@@ -2,7 +2,7 @@
 
 Synq is a terminal-native, keyboard-driven client for the Synq developer network — a place to post, chat, and connect with other developers without leaving the terminal. All private messaging is end-to-end encrypted on the client before it ever reaches the network.
 
-This repository contains the Go client. The companion backend lives in [`synq-server`](github.com/HomieB-tt/synq-server).
+This repository contains the Go client. The companion backend lives in [`synq-server`](../synq-server).
 
 ## What it does
 

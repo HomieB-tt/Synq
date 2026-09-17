@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/HomieB-tt/synq/internal/app"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
 )
@@ -48,9 +49,7 @@ func run() error {
 		return err
 	}
 
-	// TODO: hand id off to internal/app to start the Bubble Tea program.
-	fmt.Printf("Identity ready. Public key: %x\n", id.SigningPublic)
-	return nil
+	return app.Run(id)
 }
 
 // keyStorePath returns the path to the local SQLite key store,

@@ -6,6 +6,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -43,6 +44,43 @@ func (t tab) String() string {
 
 var allTabs = []tab{tabFeed, tabNodes, tabChat, tabProfile}
 
+// bootMessages are shown in sequence on the startup splash screen, one
+// at a time, before the main TUI appears.
+//
+// "Establishing connection..." is currently cosmetic - synq-server's
+// auth/WS handshake (synq-server-DESIGN.md section 1-2) doesn't exist
+// yet, so there is no real connection to establish. This is written so
+// swapping the fixed-duration boot sequence for a real connection
+// check later only touches bootTickMsg handling in Update, not the
+// rendering code.
+var bootMessages = []string{
+	"Loading identity...",
+	"Establishing connection...",
+	"Syncing feed...",
+}
+
+// spinnerFrames is a small hand-rolled animation (deliberately not
+// using bubbles/spinner - see TECH_STACK.md on why this project avoids
+// pulling in bubbles components whose exact v2 API hasn't been
+// confirmed against live documentation).
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const (
+	bootTickInterval = 80 * time.Millisecond
+	bootTicksPerMsg  = 6 // ~480ms shown per boot message
+)
+
+// bootTickMsg drives both the spinner animation and, every
+// bootTicksPerMsg ticks, advancing to the next boot message (or ending
+// the boot sequence after the last one).
+type bootTickMsg time.Time
+
+func bootTick() tea.Cmd {
+	return tea.Tick(bootTickInterval, func(t time.Time) tea.Msg {
+		return bootTickMsg(t)
+	})
+}
+
 // Model is the Bubble Tea root model for the whole application.
 type Model struct {
 	identity *crypto.Identity
@@ -52,6 +90,13 @@ type Model struct {
 	activeTab tab
 	width     int
 	height    int
+
+	// booting is true while the startup splash (header + loading
+	// animation) is showing, before the main tab UI appears.
+	booting       bool
+	bootMsgIndex  int
+	bootTickCount int
+	spinnerFrame  int
 
 	// commandMode is true while the `:` / Ctrl+P command palette input
 	// is open and capturing keystrokes.
@@ -84,6 +129,7 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		store:     store,
 		theme:     theme,
 		activeTab: tabFeed,
+		booting:   true,
 	}
 }
 
@@ -96,16 +142,18 @@ func Run(id *crypto.Identity, store *db.KeyStore) error {
 }
 
 // Init requests the terminal's background color so the theme can pick
-// a sensible starting point. Lip Gloss v2 removed automatic background
-// detection (DESIGN.md section 7), so this is deliberate and explicit,
-// not automatic - see handleBackgroundColor.
+// a sensible starting point (DESIGN.md section 7), and kicks off the
+// startup splash animation.
 func (m Model) Init() tea.Cmd {
-	return tea.RequestBackgroundColor
+	return tea.Batch(tea.RequestBackgroundColor, bootTick())
 }
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+
+	case bootTickMsg:
+		return m.handleBootTick()
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -116,6 +164,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleBackgroundColor(msg), nil
 
 	case tea.KeyPressMsg:
+		if m.booting {
+			// Any key skips straight to the main UI rather than
+			// trapping the user in a fixed-duration animation.
+			m.booting = false
+			return m, nil
+		}
 		if m.commandMode {
 			return m.updateCommandMode(msg)
 		}
@@ -123,6 +177,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// handleBootTick advances the spinner every tick, and every
+// bootTicksPerMsg ticks either moves to the next boot message or, after
+// the last one, ends the splash screen and stops ticking.
+func (m Model) handleBootTick() (tea.Model, tea.Cmd) {
+	if !m.booting {
+		// A stray tick arriving after boot ended (e.g. the user skipped
+		// it by pressing a key) - do nothing, and critically, don't
+		// requeue another tick, or it would tick forever in the
+		// background.
+		return m, nil
+	}
+
+	m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+	m.bootTickCount++
+
+	if m.bootTickCount >= bootTicksPerMsg {
+		m.bootTickCount = 0
+		m.bootMsgIndex++
+		if m.bootMsgIndex >= len(bootMessages) {
+			m.booting = false
+			return m, nil
+		}
+	}
+
+	return m, bootTick()
 }
 
 // handleBackgroundColor uses the terminal's reported background only
@@ -265,16 +346,77 @@ func (m Model) View() tea.View {
 		return tea.NewView("")
 	}
 
-	var b strings.Builder
-	b.WriteString(m.renderTabBar())
-	b.WriteString("\n\n")
-	b.WriteString(m.renderContent())
-	b.WriteString("\n")
-	b.WriteString(m.renderBottomBar())
+	var content string
+	if m.booting {
+		content = m.renderBoot()
+	} else {
+		var b strings.Builder
+		b.WriteString(m.renderTabBar())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderContent())
+		b.WriteString("\n")
+		b.WriteString(m.renderBottomBar())
+		content = b.String()
+	}
 
-	v := tea.NewView(b.String())
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	// Fill every cell of the viewport via ordinary SGR styling, not
+	// tea.View's BackgroundColor/ForegroundColor fields. Those fields
+	// set the terminal's actual color profile via an OSC escape
+	// sequence - a persistent, global change, not one scoped to this
+	// program's alt-screen session - and there's no confirmed way to
+	// reliably undo that on quit. Styling the content itself has none
+	// of that risk: it's confined to the alt-screen buffer and is
+	// discarded automatically when Synq exits, the same way vim or
+	// htop never change your prompt's colors after you quit them.
+	screen := m.theme.Screen.Width(width).Height(height).Render(content)
+
+	v := tea.NewView(screen)
 	v.AltScreen = true
 	return v
+}
+
+// renderBoot draws the startup splash: the Synq header, a subtitle,
+// and the current boot message with its spinner, all centered in the
+// terminal. Skippable by pressing any key (see the tea.KeyPressMsg
+// case in Update).
+func (m Model) renderBoot() string {
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.theme.Palette.Accent).
+		Render("SYNQ")
+
+	subtitle := m.theme.Muted.Render("terminal-native developer network")
+
+	msg := bootMessages[m.bootMsgIndex]
+	status := m.theme.StatusBar.Render(spinnerFrames[m.spinnerFrame] + " " + msg)
+
+	block := lipgloss.JoinVertical(lipgloss.Center,
+		header,
+		"",
+		subtitle,
+		"",
+		status,
+	)
+
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, block)
 }
 
 func (m Model) renderTabBar() string {

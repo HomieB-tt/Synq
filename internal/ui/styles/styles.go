@@ -81,6 +81,13 @@ var All = map[string]Palette{
 type Theme struct {
 	Palette Palette
 
+	// Screen fills the entire terminal viewport with the palette's
+	// background/foreground via ordinary SGR styling (not terminal OSC
+	// color-setting - see model.go's View for why that distinction
+	// matters). Confined to the alt-screen buffer, so it can never
+	// leak into the user's terminal after Synq exits.
+	Screen lipgloss.Style
+
 	TabActive   lipgloss.Style
 	TabInactive lipgloss.Style
 	Border      lipgloss.Style
@@ -96,6 +103,10 @@ func New(p Palette) Theme {
 	return Theme{
 		Palette: p,
 
+		Screen: lipgloss.NewStyle().
+			Background(p.Background).
+			Foreground(p.Foreground),
+
 		TabActive: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(p.Background).
@@ -104,24 +115,37 @@ func New(p Palette) Theme {
 
 		TabInactive: lipgloss.NewStyle().
 			Foreground(p.Muted).
+			Background(p.Background).
 			Padding(0, 2),
 
 		Border: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(p.Border),
+			BorderForeground(p.Border).
+			Background(p.Background).
+			Foreground(p.Foreground),
 
 		StatusBar: lipgloss.NewStyle().
-			Foreground(p.Muted),
+			Foreground(p.Muted).
+			Background(p.Background),
 
 		CommandBar: lipgloss.NewStyle().
 			Foreground(p.Foreground).
+			Background(p.Background).
 			Padding(0, 1),
 
-		Muted: lipgloss.NewStyle().Foreground(p.Muted),
+		Muted: lipgloss.NewStyle().
+			Foreground(p.Muted).
+			Background(p.Background),
 
-		Warning: lipgloss.NewStyle().Foreground(p.Warning).Bold(true),
+		Warning: lipgloss.NewStyle().
+			Foreground(p.Warning).
+			Background(p.Background).
+			Bold(true),
 
-		Error: lipgloss.NewStyle().Foreground(p.Error).Bold(true),
+		Error: lipgloss.NewStyle().
+			Foreground(p.Error).
+			Background(p.Background).
+			Bold(true),
 	}
 }
 

@@ -29,9 +29,11 @@ CREATE TABLE IF NOT EXISTS identity_vault (
 );
 `
 
-// KeyStore persists a single passphrase-encrypted identity vault in the
-// local SQLite database. Synq is single-device by design (DESIGN.md
-// section 5), so there is ever only one row: id = 1.
+// KeyStore is the local SQLite database handle for the Synq client. It
+// persists the passphrase-encrypted identity vault (this file) and
+// simple, non-secret preferences such as the selected theme (see
+// preferences.go). Synq is single-device by design (DESIGN.md section
+// 5), so there is ever only one identity row.
 type KeyStore struct {
 	sqldb *sql.DB
 }
@@ -47,6 +49,11 @@ func OpenKeyStore(path string) (*KeyStore, error) {
 	if _, err := sqldb.Exec(keyStoreSchema); err != nil {
 		sqldb.Close()
 		return nil, fmt.Errorf("db: migrate key store schema: %w", err)
+	}
+
+	if _, err := sqldb.Exec(preferencesSchema); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("db: migrate preferences schema: %w", err)
 	}
 
 	return &KeyStore{sqldb: sqldb}, nil

@@ -67,4 +67,3 @@ synq/
 
 ## License
 
-TBD.

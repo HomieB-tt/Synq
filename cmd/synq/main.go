@@ -49,7 +49,7 @@ func run() error {
 		return err
 	}
 
-	return app.Run(id)
+	return app.Run(id, ks)
 }
 
 // keyStorePath returns the path to the local SQLite key store,

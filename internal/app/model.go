@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/HomieB-tt/synq/internal/crypto"
+	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
 )
 
@@ -45,6 +46,7 @@ var allTabs = []tab{tabFeed, tabNodes, tabChat, tabProfile}
 // Model is the Bubble Tea root model for the whole application.
 type Model struct {
 	identity *crypto.Identity
+	store    *db.KeyStore
 	theme    styles.Theme
 
 	activeTab tab
@@ -62,11 +64,25 @@ type Model struct {
 
 // New builds the initial root model for a given, already-unlocked
 // identity (see cmd/synq/main.go for the passphrase bootstrap that
-// produces it).
-func New(id *crypto.Identity) Model {
+// produces it) and the same KeyStore that identity was loaded from,
+// which also holds non-secret preferences like the selected theme.
+//
+// The saved theme (if any) is loaded here, synchronously, rather than
+// via a tea.Cmd - this runs once, before the program starts, not
+// during the event loop, so there's no risk of it blocking input
+// handling.
+func New(id *crypto.Identity, store *db.KeyStore) Model {
+	theme := styles.Default()
+	if name, err := store.LoadPreference(db.PrefTheme); err == nil {
+		if palette, ok := styles.All[name]; ok {
+			theme = styles.New(palette)
+		}
+	}
+
 	return Model{
 		identity:  id,
-		theme:     styles.Default(),
+		store:     store,
+		theme:     theme,
 		activeTab: tabFeed,
 	}
 }
@@ -74,8 +90,8 @@ func New(id *crypto.Identity) Model {
 // Run starts the Bubble Tea program. This is the hand-off point from
 // the passphrase bootstrap in cmd/synq/main.go into the interactive
 // TUI.
-func Run(id *crypto.Identity) error {
-	_, err := tea.NewProgram(New(id)).Run()
+func Run(id *crypto.Identity, store *db.KeyStore) error {
+	_, err := tea.NewProgram(New(id, store)).Run()
 	return err
 }
 
@@ -211,11 +227,19 @@ func (m *Model) runCommand(cmd string) (result string, quit bool) {
 		if len(fields) != 2 {
 			return "Usage: :theme <dracula|nord|monokai>", false
 		}
-		palette, ok := styles.All[strings.ToLower(fields[1])]
+		name := strings.ToLower(fields[1])
+		palette, ok := styles.All[name]
 		if !ok {
 			return fmt.Sprintf("Unknown theme %q. Try dracula, nord, or monokai.", fields[1]), false
 		}
 		m.theme = styles.New(palette)
+		if err := m.store.SavePreference(db.PrefTheme, name); err != nil {
+			// The theme still applies for this session even if saving
+			// it failed - just tell the user it won't survive a
+			// restart, rather than silently losing their choice or
+			// refusing to apply it.
+			return fmt.Sprintf("Theme set to %s, but couldn't save it: %v", palette.Name, err), false
+		}
 		return fmt.Sprintf("Theme set to %s.", palette.Name), false
 
 	case "quit", "q":

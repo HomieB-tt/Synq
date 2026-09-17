@@ -306,12 +306,12 @@ func (m *Model) runCommand(cmd string) (result string, quit bool) {
 	switch fields[0] {
 	case "theme":
 		if len(fields) != 2 {
-			return "Usage: :theme <dracula|nord|monokai>", false
+			return fmt.Sprintf("Usage: :theme <%s>", strings.Join(styles.Names(), "|")), false
 		}
 		name := strings.ToLower(fields[1])
 		palette, ok := styles.All[name]
 		if !ok {
-			return fmt.Sprintf("Unknown theme %q. Try dracula, nord, or monokai.", fields[1]), false
+			return fmt.Sprintf("Unknown theme %q. Available: %s.", fields[1], strings.Join(styles.Names(), ", ")), false
 		}
 		m.theme = styles.New(palette)
 		if err := m.store.SavePreference(db.PrefTheme, name); err != nil {

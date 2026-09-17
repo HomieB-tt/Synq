@@ -1,6 +1,7 @@
-// Package styles defines Lip Gloss v2 theme palettes (Dracula, Nord,
-// Monokai) and the derived styles the TUI shell uses for chrome: tabs,
-// borders, status bar, command palette.
+// Package styles defines Lip Gloss v2 theme palettes and the derived
+// styles the TUI shell uses for chrome: tabs, borders, status bar,
+// command palette. Built-in themes: Dracula, Nord, Monokai, Catppuccin,
+// Gruvbox, Tokyo Night, and Solarized.
 //
 // Lip Gloss v2 removed automatic background/adaptive-color detection
 // (see DESIGN.md section 7) - theme selection here is explicit, with
@@ -10,6 +11,7 @@ package styles
 
 import (
 	"image/color"
+	"sort"
 
 	"charm.land/lipgloss/v2"
 )
@@ -67,14 +69,78 @@ var (
 		Warning:    lipgloss.Color("#e6db74"),
 		Error:      lipgloss.Color("#f92672"),
 	}
+
+	// Catppuccin is the Mocha variant - the theme your terminal is
+	// probably already using, per the bug report that led to fixing
+	// the full-screen background painting above.
+	Catppuccin = Palette{
+		Name:       "catppuccin",
+		Background: lipgloss.Color("#1e1e2e"),
+		Foreground: lipgloss.Color("#cdd6f4"),
+		Muted:      lipgloss.Color("#6c7086"),
+		Accent:     lipgloss.Color("#cba6f7"),
+		Border:     lipgloss.Color("#45475a"),
+		Warning:    lipgloss.Color("#f9e2af"),
+		Error:      lipgloss.Color("#f38ba8"),
+	}
+
+	Gruvbox = Palette{
+		Name:       "gruvbox",
+		Background: lipgloss.Color("#282828"),
+		Foreground: lipgloss.Color("#ebdbb2"),
+		Muted:      lipgloss.Color("#928374"),
+		Accent:     lipgloss.Color("#fe8019"),
+		Border:     lipgloss.Color("#3c3836"),
+		Warning:    lipgloss.Color("#fabd2f"),
+		Error:      lipgloss.Color("#fb4934"),
+	}
+
+	TokyoNight = Palette{
+		Name:       "tokyonight",
+		Background: lipgloss.Color("#1a1b26"),
+		Foreground: lipgloss.Color("#c0caf5"),
+		Muted:      lipgloss.Color("#565f89"),
+		Accent:     lipgloss.Color("#7aa2f7"),
+		Border:     lipgloss.Color("#292e42"),
+		Warning:    lipgloss.Color("#e0af68"),
+		Error:      lipgloss.Color("#f7768e"),
+	}
+
+	Solarized = Palette{
+		Name:       "solarized",
+		Background: lipgloss.Color("#002b36"),
+		Foreground: lipgloss.Color("#839496"),
+		Muted:      lipgloss.Color("#586e75"),
+		Accent:     lipgloss.Color("#268bd2"),
+		Border:     lipgloss.Color("#073642"),
+		Warning:    lipgloss.Color("#b58900"),
+		Error:      lipgloss.Color("#dc322f"),
+	}
 )
 
 // All is every built-in palette, keyed by the name used to select it
 // from the command palette (e.g. `:theme nord`).
 var All = map[string]Palette{
-	Dracula.Name: Dracula,
-	Nord.Name:    Nord,
-	Monokai.Name: Monokai,
+	Dracula.Name:    Dracula,
+	Nord.Name:       Nord,
+	Monokai.Name:    Monokai,
+	Catppuccin.Name: Catppuccin,
+	Gruvbox.Name:    Gruvbox,
+	TokyoNight.Name: TokyoNight,
+	Solarized.Name:  Solarized,
+}
+
+// Names returns every built-in theme name, sorted, for use in help and
+// error text (e.g. "Usage: :theme <dracula|nord|...>") - listed
+// programmatically rather than hardcoded so this never drifts out of
+// sync with All as themes are added.
+func Names() []string {
+	names := make([]string, 0, len(All))
+	for name := range All {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Theme is the set of ready-to-use styles derived from a Palette.

@@ -1,7 +1,8 @@
 // Package styles defines Lip Gloss v2 theme palettes and the derived
 // styles the TUI shell uses for chrome: tabs, borders, status bar,
 // command palette. Built-in themes: Dracula, Nord, Monokai, Catppuccin,
-// Gruvbox, Tokyo Night, and Solarized.
+// Gruvbox, Tokyo Night, Solarized, One Dark, Rosé Pine, Ayu, and
+// Everforest.
 //
 // Lip Gloss v2 removed automatic background/adaptive-color detection
 // (see DESIGN.md section 7) - theme selection here is explicit, with
@@ -116,6 +117,51 @@ var (
 		Warning:    lipgloss.Color("#b58900"),
 		Error:      lipgloss.Color("#dc322f"),
 	}
+
+	// OneDark is Atom's flagship theme.
+	OneDark = Palette{
+		Name:       "onedark",
+		Background: lipgloss.Color("#282c34"),
+		Foreground: lipgloss.Color("#abb2bf"),
+		Muted:      lipgloss.Color("#5c6370"),
+		Accent:     lipgloss.Color("#61afef"),
+		Border:     lipgloss.Color("#3e4451"),
+		Warning:    lipgloss.Color("#e5c07b"),
+		Error:      lipgloss.Color("#e06c75"),
+	}
+
+	RosePine = Palette{
+		Name:       "rosepine",
+		Background: lipgloss.Color("#191724"),
+		Foreground: lipgloss.Color("#e0def4"),
+		Muted:      lipgloss.Color("#6e6a86"),
+		Accent:     lipgloss.Color("#c4a7e7"),
+		Border:     lipgloss.Color("#403d52"),
+		Warning:    lipgloss.Color("#f6c177"),
+		Error:      lipgloss.Color("#eb6f92"),
+	}
+
+	Ayu = Palette{
+		Name:       "ayu",
+		Background: lipgloss.Color("#0a0e14"),
+		Foreground: lipgloss.Color("#b3b1ad"),
+		Muted:      lipgloss.Color("#4d5566"),
+		Accent:     lipgloss.Color("#ff8f40"),
+		Border:     lipgloss.Color("#131721"),
+		Warning:    lipgloss.Color("#ffb454"),
+		Error:      lipgloss.Color("#ff3333"),
+	}
+
+	Everforest = Palette{
+		Name:       "everforest",
+		Background: lipgloss.Color("#2d353b"),
+		Foreground: lipgloss.Color("#d3c6aa"),
+		Muted:      lipgloss.Color("#7a8478"),
+		Accent:     lipgloss.Color("#a7c080"),
+		Border:     lipgloss.Color("#414b50"),
+		Warning:    lipgloss.Color("#dbbc7f"),
+		Error:      lipgloss.Color("#e67e80"),
+	}
 )
 
 // All is every built-in palette, keyed by the name used to select it
@@ -128,6 +174,10 @@ var All = map[string]Palette{
 	Gruvbox.Name:    Gruvbox,
 	TokyoNight.Name: TokyoNight,
 	Solarized.Name:  Solarized,
+	OneDark.Name:    OneDark,
+	RosePine.Name:   RosePine,
+	Ayu.Name:        Ayu,
+	Everforest.Name: Everforest,
 }
 
 // Names returns every built-in theme name, sorted, for use in help and

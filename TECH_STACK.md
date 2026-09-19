@@ -40,6 +40,10 @@ The spec listed `crypto/ed25519` and `golang.org/x/crypto/nacl/box`. Per the des
 
 All three are included in the `golang.org/x/crypto` module already pinned above — no extra dependency needed.
 
+## Note on internal/github
+
+The GitHub Device Flow client (`internal/github/device_flow.go`) uses only the Go standard library (`net/http`, `encoding/json`) - no dependency was added for this. Its test suite (`device_flow_live_test.go`) makes real requests to `github.com` and `api.github.com` with a deliberately invalid client ID, to verify the request-building and response-parsing logic against GitHub's actual API shape rather than an assumption about it. This means `go test ./...` makes real outbound network calls for this package specifically - expect those two tests to fail (not hang) if run somewhere without internet access, such as an offline CI runner.
+
 ## Versioning note
 
 These are the latest stable versions as of this scaffold's creation. Before your first build, running `go get -u ./...` followed by `go mod tidy` will pick up any newer patch releases.

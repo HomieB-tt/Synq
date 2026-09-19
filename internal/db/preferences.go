@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS preferences (
 // (e.g. "dracula", "nord", "monokai") is stored.
 const PrefTheme = "theme"
 
+// PrefGitHubHandle is the preferences key under which a linked GitHub
+// username is stored, once the optional verification flow (see
+// synq-DESIGN.md section 9, synq-server-DESIGN.md section 1) succeeds.
+const PrefGitHubHandle = "github_handle"
+
 // SavePreference stores a simple key/value setting, such as the
 // selected theme. Unlike identity_vault, preferences are not secret and
 // are stored in plaintext - there is nothing here that needs Argon2id

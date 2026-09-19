@@ -4,7 +4,11 @@
 package app
 
 import (
+	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +17,7 @@ import (
 
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
+	"github.com/HomieB-tt/synq/internal/github"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
 )
 
@@ -81,6 +86,78 @@ func bootTick() tea.Cmd {
 	})
 }
 
+// --- GitHub Device Flow wiring ---
+//
+// See internal/github/device_flow.go for the actual HTTP client (pure
+// stdlib, fully unit-tested against the real github.com/api.github.com
+// endpoints - see its tests). Everything here is just the Bubble Tea
+// glue: message types carrying results back into Update, and the
+// tea.Cmd functions that make the (blocking, but backgrounded-by-
+// Bubble-Tea) HTTP calls.
+//
+// This is a genuinely optional verification badge, not part of Synq's
+// own account system - see synq-server-DESIGN.md section 1.
+
+const githubHTTPTimeout = 15 * time.Second
+
+type githubDeviceCodeMsg struct {
+	dc  *github.DeviceCode
+	err error
+}
+
+type githubPollTickMsg struct{}
+
+type githubPollResultMsg struct {
+	result *github.PollResult
+	err    error
+}
+
+type githubUserMsg struct {
+	user *github.User
+	err  error
+}
+
+func requestGitHubDeviceCodeCmd(clientID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), githubHTTPTimeout)
+		defer cancel()
+		dc, err := github.RequestDeviceCode(ctx, clientID)
+		return githubDeviceCodeMsg{dc: dc, err: err}
+	}
+}
+
+// githubPollTickCmd waits intervalSecs (falling back to a safe default
+// if GitHub ever reported zero or a negative value) before triggering
+// the next poll. This is a plain tea.Tick, not a busy-loop - it costs
+// nothing while waiting.
+func githubPollTickCmd(intervalSecs int) tea.Cmd {
+	d := time.Duration(intervalSecs) * time.Second
+	if d <= 0 {
+		d = 5 * time.Second
+	}
+	return tea.Tick(d, func(t time.Time) tea.Msg {
+		return githubPollTickMsg{}
+	})
+}
+
+func pollGitHubOnceCmd(clientID, deviceCode string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), githubHTTPTimeout)
+		defer cancel()
+		result, err := github.PollOnce(ctx, clientID, deviceCode)
+		return githubPollResultMsg{result: result, err: err}
+	}
+}
+
+func fetchGitHubUserCmd(token string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), githubHTTPTimeout)
+		defer cancel()
+		user, err := github.FetchUser(ctx, token)
+		return githubUserMsg{user: user, err: err}
+	}
+}
+
 // Model is the Bubble Tea root model for the whole application.
 type Model struct {
 	identity *crypto.Identity
@@ -104,6 +181,22 @@ type Model struct {
 	commandInput string
 	commandMsg   string // last command result/error, shown until the next command
 
+	// connected reflects whether Synq has a live connection to
+	// synq-server. It is currently a stub that is never set true -
+	// there is no server to connect to yet (see synq-server-DESIGN.md).
+	// It exists now so the UI has a place to show real status the
+	// moment a real WS client exists, without a later layout change.
+	connected bool
+
+	// GitHub verification (synq-DESIGN.md section 9). Optional, and
+	// entirely separate from Synq's own identity/auth.
+	githubClientID        string // from SYNQ_GITHUB_CLIENT_ID; empty means "not configured"
+	githubHandle          string // set once linking succeeds; persisted via db.PrefGitHubHandle
+	githubUserCode        string // shown to the user while waiting for browser approval
+	githubVerificationURI string
+	githubDeviceCode      string
+	githubPollInterval    int
+
 	quitting bool
 }
 
@@ -124,12 +217,19 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		}
 	}
 
+	// Ignoring the error here is deliberate: ErrPreferenceNotFound just
+	// means "never linked", which is exactly what an empty string
+	// already represents - there's nothing to distinguish or report.
+	githubHandle, _ := store.LoadPreference(db.PrefGitHubHandle)
+
 	return Model{
-		identity:  id,
-		store:     store,
-		theme:     theme,
-		activeTab: tabFeed,
-		booting:   true,
+		identity:       id,
+		store:          store,
+		theme:          theme,
+		activeTab:      tabFeed,
+		booting:        true,
+		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
+		githubHandle:   githubHandle,
 	}
 }
 
@@ -154,6 +254,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bootTickMsg:
 		return m.handleBootTick()
+
+	case githubDeviceCodeMsg:
+		return m.handleGitHubDeviceCode(msg)
+
+	case githubPollTickMsg:
+		return m, pollGitHubOnceCmd(m.githubClientID, m.githubDeviceCode)
+
+	case githubPollResultMsg:
+		return m.handleGitHubPollResult(msg)
+
+	case githubUserMsg:
+		return m.handleGitHubUser(msg)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -204,6 +316,99 @@ func (m Model) handleBootTick() (tea.Model, tea.Cmd) {
 	}
 
 	return m, bootTick()
+}
+
+// handleGitHubDeviceCode processes the result of starting the Device
+// Flow: either an error (shown and the flow left un-started), or the
+// code the user needs to enter in their browser, plus kicking off the
+// first poll after GitHub's requested interval.
+func (m Model) handleGitHubDeviceCode(msg githubDeviceCodeMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.commandMsg = fmt.Sprintf("GitHub linking failed: %v", msg.err)
+		return m, nil
+	}
+
+	m.githubUserCode = msg.dc.UserCode
+	m.githubVerificationURI = msg.dc.VerificationURI
+	m.githubDeviceCode = msg.dc.DeviceCode
+	m.githubPollInterval = msg.dc.Interval
+	m.commandMsg = fmt.Sprintf("Open %s and enter code: %s", msg.dc.VerificationURI, msg.dc.UserCode)
+
+	return m, githubPollTickCmd(m.githubPollInterval)
+}
+
+// handleGitHubPollResult processes a single poll attempt against
+// GitHub's access token endpoint. See internal/github's PollStatus
+// values for what each of these means per GitHub's own Device Flow
+// spec.
+func (m Model) handleGitHubPollResult(msg githubPollResultMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.commandMsg = fmt.Sprintf("GitHub linking failed: %v", msg.err)
+		m.resetGitHubFlow()
+		return m, nil
+	}
+
+	switch msg.result.Status {
+	case github.PollPending:
+		return m, githubPollTickCmd(m.githubPollInterval)
+
+	case github.PollSlowDown:
+		// GitHub requires widening the interval when told to slow
+		// down - ignoring this risks the whole flow being rejected,
+		// not just this one request.
+		m.githubPollInterval = msg.result.Interval
+		return m, githubPollTickCmd(m.githubPollInterval)
+
+	case github.PollExpired:
+		m.commandMsg = "GitHub linking timed out before you approved it. Run :github to try again."
+		m.resetGitHubFlow()
+		return m, nil
+
+	case github.PollDenied:
+		m.commandMsg = "GitHub authorization was denied."
+		m.resetGitHubFlow()
+		return m, nil
+
+	case github.PollSuccess:
+		m.commandMsg = "Authorized - fetching your GitHub username..."
+		return m, fetchGitHubUserCmd(msg.result.Token)
+
+	default:
+		m.commandMsg = fmt.Sprintf("GitHub linking failed: unexpected status %q", msg.result.Status)
+		m.resetGitHubFlow()
+		return m, nil
+	}
+}
+
+// handleGitHubUser processes the final step: turning a successful
+// token into an actual username, and persisting it so it survives a
+// restart (mirroring how the selected theme is persisted).
+func (m Model) handleGitHubUser(msg githubUserMsg) (tea.Model, tea.Cmd) {
+	m.resetGitHubFlow()
+
+	if msg.err != nil {
+		m.commandMsg = fmt.Sprintf("GitHub linking failed: %v", msg.err)
+		return m, nil
+	}
+
+	m.githubHandle = msg.user.Login
+	if err := m.store.SavePreference(db.PrefGitHubHandle, msg.user.Login); err != nil {
+		m.commandMsg = fmt.Sprintf("Linked as @%s, but couldn't save it - you'll need to relink after restarting: %v", msg.user.Login, err)
+		return m, nil
+	}
+
+	m.commandMsg = fmt.Sprintf("GitHub linked: @%s", msg.user.Login)
+	return m, nil
+}
+
+// resetGitHubFlow clears in-progress Device Flow state, whether the
+// flow succeeded, failed, expired, or was denied. It deliberately does
+// not touch githubHandle - only the transient, in-progress fields.
+func (m *Model) resetGitHubFlow() {
+	m.githubUserCode = ""
+	m.githubVerificationURI = ""
+	m.githubDeviceCode = ""
+	m.githubPollInterval = 0
 }
 
 // handleBackgroundColor uses the terminal's reported background only
@@ -261,7 +466,7 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		result, quit := m.runCommand(strings.TrimSpace(m.commandInput))
+		result, quit, cmd := m.runCommand(strings.TrimSpace(m.commandInput))
 		m.commandMsg = result
 		m.commandMode = false
 		m.commandInput = ""
@@ -269,7 +474,7 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
-		return m, nil
+		return m, cmd
 
 	case "backspace":
 		if len(m.commandInput) > 0 {
@@ -290,28 +495,26 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// runCommand handles a submitted command palette entry. Only `:theme`
-// and `:quit` are implemented so far; everything else is a placeholder
-// for future wiring (post composer, :verify, node requests, etc. - see
-// synq-DESIGN.md and synq-server-DESIGN.md for what each will
-// eventually need to do). The bool return tells the caller whether to
-// actually issue tea.Quit - setting a "quitting" flag alone does not
-// stop the Bubble Tea event loop.
-func (m *Model) runCommand(cmd string) (result string, quit bool) {
+// runCommand handles a submitted command palette entry. The bool
+// return tells the caller whether to actually issue tea.Quit - setting
+// a "quitting" flag alone does not stop the Bubble Tea event loop. The
+// tea.Cmd return lets commands that need to do async work (currently
+// just :github) kick that off; every other command returns nil here.
+func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.Cmd) {
 	if cmd == "" {
-		return "", false
+		return "", false, nil
 	}
 
 	fields := strings.Fields(cmd)
 	switch fields[0] {
 	case "theme":
 		if len(fields) != 2 {
-			return fmt.Sprintf("Usage: :theme <%s>", strings.Join(styles.Names(), "|")), false
+			return fmt.Sprintf("Usage: :theme <%s>", strings.Join(styles.Names(), "|")), false, nil
 		}
 		name := strings.ToLower(fields[1])
 		palette, ok := styles.All[name]
 		if !ok {
-			return fmt.Sprintf("Unknown theme %q. Available: %s.", fields[1], strings.Join(styles.Names(), ", ")), false
+			return fmt.Sprintf("Unknown theme %q. Available: %s.", fields[1], strings.Join(styles.Names(), ", ")), false, nil
 		}
 		m.theme = styles.New(palette)
 		if err := m.store.SavePreference(db.PrefTheme, name); err != nil {
@@ -319,16 +522,55 @@ func (m *Model) runCommand(cmd string) (result string, quit bool) {
 			// it failed - just tell the user it won't survive a
 			// restart, rather than silently losing their choice or
 			// refusing to apply it.
-			return fmt.Sprintf("Theme set to %s, but couldn't save it: %v", palette.Name, err), false
+			return fmt.Sprintf("Theme set to %s, but couldn't save it: %v", palette.Name, err), false, nil
 		}
-		return fmt.Sprintf("Theme set to %s.", palette.Name), false
+		return fmt.Sprintf("Theme set to %s.", palette.Name), false, nil
+
+	case "verify":
+		if len(fields) != 2 {
+			return "Usage: :verify <hex-encoded public key>", false, nil
+		}
+		theirKey, err := decodeHexPublicKey(fields[1])
+		if err != nil {
+			return fmt.Sprintf("Invalid public key: %v", err), false, nil
+		}
+		fp := crypto.Fingerprint(m.identity.SigningPublic, theirKey)
+		return fmt.Sprintf("Fingerprint: %s", fp), false, nil
+
+	case "github":
+		if m.githubHandle != "" {
+			return fmt.Sprintf("Already linked as @%s.", m.githubHandle), false, nil
+		}
+		if m.githubUserCode != "" {
+			return fmt.Sprintf("Already waiting for authorization. Open %s and enter code: %s",
+				m.githubVerificationURI, m.githubUserCode), false, nil
+		}
+		if m.githubClientID == "" {
+			return "GitHub linking isn't configured. Set SYNQ_GITHUB_CLIENT_ID and restart Synq (see README.md).", false, nil
+		}
+		return "Starting GitHub authorization...", false, requestGitHubDeviceCodeCmd(m.githubClientID)
 
 	case "quit", "q":
-		return "", true
+		return "", true, nil
 
 	default:
-		return fmt.Sprintf("Unknown command: %s", fields[0]), false
+		return fmt.Sprintf("Unknown command: %s", fields[0]), false, nil
 	}
+}
+
+// decodeHexPublicKey parses a hex-encoded Ed25519 public key, as
+// pasted by the user for :verify. There is no key lookup yet (no
+// server, no Nodes tab data - see synq-server-DESIGN.md) so this takes
+// the raw key directly rather than a username.
+func decodeHexPublicKey(s string) (ed25519.PublicKey, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("not valid hex: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("expected %d bytes, got %d", ed25519.PublicKeySize, len(raw))
+	}
+	return ed25519.PublicKey(raw), nil
 }
 
 // nextTab cycles through allTabs by delta (1 forward, -1 backward),
@@ -351,7 +593,7 @@ func (m Model) View() tea.View {
 		content = m.renderBoot()
 	} else {
 		var b strings.Builder
-		b.WriteString(m.renderTabBar())
+		b.WriteString(m.renderHeader())
 		b.WriteString("\n\n")
 		b.WriteString(m.renderContent())
 		b.WriteString("\n")
@@ -432,6 +674,44 @@ func (m Model) renderTabBar() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
+// renderHeader combines the tab bar (left) with the connection status
+// (right), spanning the full terminal width. connected is currently
+// always false (see the Model.connected doc comment) - the dot and
+// label are real UI, just wired to a stub for now.
+func (m Model) renderHeader() string {
+	tabs := m.renderTabBar()
+	status := m.renderConnectionStatus()
+
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+
+	gap := width - lipgloss.Width(tabs) - lipgloss.Width(status)
+	if gap < 1 {
+		gap = 1
+	}
+
+	return tabs + strings.Repeat(" ", gap) + status
+}
+
+// renderConnectionStatus draws the online/offline indicator. Green for
+// online is a fixed, theme-independent color rather than something
+// pulled from the palette - unlike everything else in styles.go, "is
+// this thing connected" is a universal semantic that should look the
+// same regardless of which theme is active, the same way a git diff's
+// red/green doesn't change with your editor's color scheme.
+func (m Model) renderConnectionStatus() string {
+	if m.connected {
+		return lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#4ade80")).
+			Background(m.theme.Palette.Background).
+			Render("● online")
+	}
+	return m.theme.Muted.Render("○ offline")
+}
+
 func (m Model) renderContent() string {
 	width := m.width
 	if width <= 0 {
@@ -465,10 +745,36 @@ func (m Model) renderProfile() string {
 	if m.identity == nil {
 		return "No identity loaded."
 	}
-	return fmt.Sprintf(
-		"Public key:\n%x\n\nGitHub: not linked yet\nUse :verify <username> to check a contact's key fingerprint.",
-		m.identity.SigningPublic,
-	)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Public key:\n%x\n\n", m.identity.SigningPublic)
+	fmt.Fprintf(&b, "Connection: %s\n", connectionLabel(m.connected))
+	fmt.Fprintf(&b, "GitHub: %s\n", m.githubStatusLabel())
+	fmt.Fprintf(&b, "Theme: %s\n\n", m.theme.Palette.Name)
+	b.WriteString("Commands:\n")
+	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
+	b.WriteString("  :github                link your GitHub account\n")
+	b.WriteString("  :theme <name>          switch color theme\n")
+	return b.String()
+}
+
+func connectionLabel(connected bool) string {
+	if connected {
+		return "online"
+	}
+	return "offline"
+}
+
+// githubStatusLabel covers all three states of the Device Flow: never
+// started, waiting on the user to approve in a browser, or linked.
+func (m Model) githubStatusLabel() string {
+	if m.githubHandle != "" {
+		return fmt.Sprintf("[✓ @%s]", m.githubHandle)
+	}
+	if m.githubUserCode != "" {
+		return fmt.Sprintf("waiting - open %s and enter code %s", m.githubVerificationURI, m.githubUserCode)
+	}
+	return "not linked - run :github to verify"
 }
 
 func (m Model) renderBottomBar() string {

@@ -48,6 +48,30 @@ Requires Go 1.23+.
 | `Ctrl+O` | Open `$EDITOR` while composing a post |
 | `q` / `Ctrl+C` | Quit |
 
+## Command palette
+
+| Command | Does |
+|---|---|
+| `:theme <name>` | Switch color theme. Run `:theme` with no argument to list available themes. Persists across restarts. |
+| `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
+| `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
+| `:quit` | Same as pressing `q`. |
+
+## Configuration
+
+**`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
+
+To set it up:
+1. On GitHub, go to **Settings → Developer settings → OAuth Apps → New OAuth App** (a plain OAuth App, not a GitHub App).
+2. Fill in a name and homepage URL (anything - GitHub requires a value here, but the Device Flow used by Synq never redirects to it).
+3. After creating the app, enable **"Enable Device Flow"** in its settings. This is off by default and the flow will fail without it.
+4. Copy the **Client ID** (not the client secret - Device Flow doesn't use one) and set it before running Synq:
+   ```
+   export SYNQ_GITHUB_CLIENT_ID=your_client_id_here
+   ```
+
+Note that right now, a successful `:github` link is verified against GitHub directly and stored locally - it is not yet cross-checked by `synq-server` (which doesn't have an auth system yet), so the badge is currently self-asserted rather than independently confirmed by anyone else. See `synq-server-DESIGN.md` section 1 for the eventual full picture.
+
 ## Project layout
 
 ```

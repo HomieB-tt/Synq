@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/term"
 
@@ -39,17 +40,61 @@ func run() error {
 		return fmt.Errorf("check for existing identity: %w", err)
 	}
 
-	var id *crypto.Identity
-	if has {
-		id, err = unlockIdentity(ks)
-	} else {
-		id, err = createIdentity(ks)
+	if !has {
+		return runLanding(ks)
 	}
+
+	id, err := unlockIdentity(ks)
 	if err != nil {
 		return err
 	}
-
 	return app.Run(id, ks)
+}
+
+// runLanding is shown on a device with no identity yet, offering a
+// choice before committing to identity creation - see DESIGN.md
+// section 10 for why: creating an identity is a one-way, no-recovery
+// commitment (section 1), so forcing it as the only option on a brand
+// new device isn't the right default.
+func runLanding(ks *db.KeyStore) error {
+	for {
+		fmt.Println()
+		fmt.Println("Welcome to Synq. No identity exists on this device yet.")
+		fmt.Println()
+		fmt.Println("  1) Browse the public feed as a guest")
+		fmt.Println("  2) Create your identity")
+		fmt.Println("  3) Quit")
+		fmt.Println()
+		fmt.Print("Choose an option: ")
+
+		choice, err := readLine()
+		if err != nil {
+			return err
+		}
+
+		switch strings.TrimSpace(choice) {
+		case "1":
+			// Guest mode: the real TUI, with a nil identity. See
+			// DESIGN.md section 10 - this deliberately reuses the same
+			// Model rather than building a separate stripped-down UI,
+			// since theme switching and Feed browsing don't need an
+			// identity at all.
+			return app.Run(nil, ks)
+
+		case "2":
+			id, err := createIdentity(ks)
+			if err != nil {
+				return err
+			}
+			return app.Run(id, ks)
+
+		case "3":
+			return nil
+
+		default:
+			fmt.Println("Please enter 1, 2, or 3.")
+		}
+	}
 }
 
 // keyStorePath returns the path to the local SQLite key store,
@@ -155,6 +200,18 @@ func promptNewPassphrase() ([]byte, error) {
 		zeroBytes(second)
 		fmt.Fprintln(os.Stderr, "Passphrases did not match. Try again.")
 	}
+}
+
+// readLine reads one line of plain, visible input - unlike
+// promptPassphrase, this is for menu choices, not secrets, so no
+// terminal echo suppression is needed.
+func readLine() (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read input: %w", err)
+	}
+	return line, nil
 }
 
 // promptPassphrase reads a line of input from the terminal without

@@ -527,6 +527,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		return fmt.Sprintf("Theme set to %s.", palette.Name), false, nil
 
 	case "verify":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
 		if len(fields) != 2 {
 			return "Usage: :verify <hex-encoded public key>", false, nil
 		}
@@ -538,6 +541,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		return fmt.Sprintf("Fingerprint: %s", fp), false, nil
 
 	case "github":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
 		if m.githubHandle != "" {
 			return fmt.Sprintf("Already linked as @%s.", m.githubHandle), false, nil
 		}
@@ -678,9 +684,22 @@ func (m Model) renderTabBar() string {
 // (right), spanning the full terminal width. connected is currently
 // always false (see the Model.connected doc comment) - the dot and
 // label are real UI, just wired to a stub for now.
+//
+// Every separator between independently-rendered spans uses an
+// explicitly backgrounded style, not a bare " " - a plain space
+// between two ANSI-reset spans has no background color of its own,
+// and the outer full-screen wrap in View() only pads at the end of a
+// line/screen, not gaps in the middle of one. This is the same class
+// of bug as the terminal-background issue fixed earlier, just at
+// smaller scale, so it's worth guarding against explicitly here too.
 func (m Model) renderHeader() string {
+	fill := lipgloss.NewStyle().Background(m.theme.Palette.Background)
+
 	tabs := m.renderTabBar()
 	status := m.renderConnectionStatus()
+	if m.identity == nil {
+		status = m.theme.Warning.Render("GUEST") + fill.Render(" ") + status
+	}
 
 	width := m.width
 	if width <= 0 {
@@ -692,7 +711,7 @@ func (m Model) renderHeader() string {
 		gap = 1
 	}
 
-	return tabs + strings.Repeat(" ", gap) + status
+	return tabs + fill.Render(strings.Repeat(" ", gap)) + status
 }
 
 // renderConnectionStatus draws the online/offline indicator. Green for
@@ -726,10 +745,21 @@ func (m Model) renderContent() string {
 	switch m.activeTab {
 	case tabFeed:
 		body = "Feed is empty for now.\n\nPost with the CLI: cat file | synq post"
+		if m.identity == nil {
+			body += "\n\nYou're browsing as a guest - post authors show as \"node\" until you create an identity."
+		}
 	case tabNodes:
-		body = "No nodes yet. Node requests will show up here."
+		if m.identity == nil {
+			body = "Create an identity to build your network. Restart Synq and choose \"Create your identity.\""
+		} else {
+			body = "No nodes yet. Node requests will show up here."
+		}
 	case tabChat:
-		body = "No open chats. Chat history is session-only - see DESIGN.md section 4."
+		if m.identity == nil {
+			body = "Create an identity to send encrypted messages. Restart Synq and choose \"Create your identity.\""
+		} else {
+			body = "No open chats. Chat history is session-only - see DESIGN.md section 4."
+		}
 	case tabProfile:
 		body = m.renderProfile()
 	}
@@ -743,7 +773,12 @@ func (m Model) renderContent() string {
 
 func (m Model) renderProfile() string {
 	if m.identity == nil {
-		return "No identity loaded."
+		return "You're browsing as a guest.\n\n" +
+			"Create an identity to post, chat, build your network, and see\n" +
+			"real usernames on the Feed instead of \"node\".\n\n" +
+			"Restart Synq and choose \"Create your identity\" from the menu.\n\n" +
+			"Theme switching works right now, even as a guest:\n" +
+			"  :theme <name>          switch color theme"
 	}
 
 	var b strings.Builder
@@ -783,6 +818,11 @@ func (m Model) renderBottomBar() string {
 	}
 	if m.commandMsg != "" {
 		return m.theme.Warning.Render(m.commandMsg)
+	}
+	if m.identity == nil {
+		return m.theme.StatusBar.Render(
+			"Guest mode - restart Synq to create an identity · 1-4 switch tabs · : command palette · q quit",
+		)
 	}
 	return m.theme.StatusBar.Render(
 		"1-4 switch tabs · Tab/Shift+Tab cycle · : command palette · q quit",

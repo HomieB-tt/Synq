@@ -86,6 +86,20 @@ This document captures the architectural decisions made for the `synq` client du
 - This avoids the need for a local HTTP callback server, which a browser-redirect OAuth flow would require and which doesn't fit a terminal-native tool.
 - Verification is optional and separate from account registration (see the `synq-server` design doc, §1) — it grants a "verified" badge, not access.
 
+## 10. Onboarding and the landing menu
+
+**Problem:** creating an identity is a one-way, no-recovery commitment (section 1) — the original flow forced this choice on every brand-new user immediately, with no way to look around first. It also meant purely local, identity-free features (theme selection) were structurally unreachable before creating an identity, since the whole TUI only ever launched after identity creation or unlock.
+
+**Decision:** a device with no identity yet is shown a menu before anything else happens, rather than being walked straight into passphrase creation:
+
+- **Browse the public feed as a guest** — launches the same Bubble Tea app used for everything else, with a `nil` identity. This is not a separate, stripped-down "guest UI" — it's the real TUI, with real theme switching (`:theme`, fully functional, since it only depends on the local preferences store, not an identity) and a real Feed tab. Nodes, Chat, and the identity-dependent parts of Profile show a clear call-to-action explaining an identity is needed, rather than being hidden or disabled outright. `:verify` and `:github` are blocked with a clear message, since both fundamentally require an identity to attach their result to.
+- **Create your identity** — the existing, already-tested passphrase creation flow, unchanged.
+- **Quit.**
+
+**Why guest mode reuses the real Model instead of a separate pre-TUI menu for feed/theme browsing:** theme selection already lives entirely in the command palette (`:theme`), backed by the same preferences table already proven independent of the identity vault (see the `TestPreferencesAreIndependentOfIdentityVault` test in `internal/db`). Building a second, separate theme-picking mechanic for guests would duplicate an already-working feature for no reason. The one thing guest mode deliberately does NOT support is creating an identity mid-session — that still requires quitting and choosing "Create your identity" from the menu, keeping passphrase entry in the single, already-tested, non-interactive terminal flow rather than adding a new masked-input widget inside Bubble Tea. In-session signup (no restart required) is a reasonable future enhancement once there's appetite for building that input widget.
+
+**How this connects to the Feed's anonymization rule (synq-server-DESIGN.md section 5):** the server decides whether to send real usernames or a flat `"node"` placeholder based on whether the request carries a valid, authenticated session — not on whether the client happens to have a local identity. A guest who has never registered/logged in and someone who has generated a local identity but never connected to a server look identical to the server. The client itself does no redaction; it only ever displays whatever `author` field the server actually sent.
+
 ## Summary table
 
 | Area | Decision |

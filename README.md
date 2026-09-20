@@ -91,4 +91,4 @@ synq/
 
 ## License
 
-TBD.
+This project is under a **Proprietory Software** license - see the [LICENSE](LICENSE) file for details.

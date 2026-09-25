@@ -11,7 +11,7 @@ Synq gives you four core views, all reachable without touching a mouse:
 - **Feed** — a global stream of posts tagged `[PROJECT]`, `[HIRING]`, or `[GENERAL]`. Pipe command output straight into a post (`cat error.log | synq post`), or open your `$EDITOR` mid-draft with `Ctrl+O`.
 - **Nodes** — your developer network. Connections move through `PENDING`, `ACTIVE`, and `BLOCKED` states.
 - **Chat** — ephemeral, end-to-end encrypted direct messages. The server relays bytes; it never sees plaintext.
-- **Profile** — your identity, including GitHub verification status (`[✓ GitHub: @username]`) and the active local Git repository, shown for context as you work.
+- **Profile** — your identity, including a local display name (`:name`, see below), GitHub verification status (`[✓ GitHub: @username]`) and the active local Git repository, shown for context as you work.
 
 ## Why terminal-native
 
@@ -54,6 +54,8 @@ Requires Go 1.23+.
 |---|---|
 | `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
+| `:name <your name>` | Set a local display name, shown in your own Profile tab. This is purely a local label - not the server-backed username system (see `DESIGN.md`), since `synq-server` doesn't exist yet to assign or verify one. |
+| `:name clear` | Clear your local display name. |
 | `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:quit` | Same as pressing `q`. |

@@ -66,3 +66,19 @@ func TestPreferencesAreIndependentOfIdentityVault(t *testing.T) {
 		t.Error("saving a preference should not create an identity vault row")
 	}
 }
+
+func TestSaveThenLoadDisplayNameRoundTrip(t *testing.T) {
+	ks := openTestStore(t)
+
+	if err := ks.SavePreference(PrefDisplayName, "Ada Lovelace"); err != nil {
+		t.Fatalf("SavePreference: %v", err)
+	}
+
+	got, err := ks.LoadPreference(PrefDisplayName)
+	if err != nil {
+		t.Fatalf("LoadPreference: %v", err)
+	}
+	if got != "Ada Lovelace" {
+		t.Errorf("got %q, want %q", got, "Ada Lovelace")
+	}
+}

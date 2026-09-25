@@ -26,6 +26,20 @@ const PrefTheme = "theme"
 // synq-DESIGN.md section 9, synq-server-DESIGN.md section 1) succeeds.
 const PrefGitHubHandle = "github_handle"
 
+// PrefDisplayName is the preferences key under which a locally-chosen
+// display name is stored (see internal/app's `:name` command).
+//
+// This is deliberately separate from, and not a substitute for, the
+// server-backed username system described in DESIGN.md ("Nothing in
+// the base design confirms that a public key returned for a username
+// actually belongs to that person"): that username is assigned by
+// synq-server at registration and is what other users actually see as
+// a post's author. This preference is a purely local, client-side
+// label - useful today as a stand-in while synq-server doesn't exist
+// yet, but not something the client sends anywhere or that any other
+// user will ever see.
+const PrefDisplayName = "display_name"
+
 // SavePreference stores a simple key/value setting, such as the
 // selected theme. Unlike identity_vault, preferences are not secret and
 // are stored in plaintext - there is nothing here that needs Argon2id

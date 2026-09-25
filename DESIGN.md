@@ -25,6 +25,7 @@ This document captures the architectural decisions made for the `synq` client du
 - If a pinned key ever changes for an existing contact, this is treated as a hard warning — new messages to that contact are blocked from encrypting until the user acknowledges the change. This is the case that actually matters: routine first-contact trust is low-stakes, but an existing contact's key changing is the signature of a substitution attack.
 - A `:verify <username>` command (or equivalent action in Profile/Chat) computes a short numeric fingerprint from both parties' public keys, in the same spirit as Signal's safety numbers, for out-of-band comparison.
 - Since GitHub identity is already surfaced in the product, the fingerprint can optionally be published on a user's GitHub profile (bio, gist, pinned repo), giving verifiers a ready-made out-of-band channel.
+- The `username` referred to throughout this section is assigned by `synq-server` at registration and is what other users actually see as a post's author - it's not something the client stores or lets you edit. The client's `:name` command (see `internal/db/preferences.go`'s `PrefDisplayName`) is a separate, purely local label shown only in your own Profile tab, useful as a stand-in while `synq-server` doesn't exist yet, but never sent anywhere and never seen by anyone else.
 
 ## 3. Forward secrecy
 

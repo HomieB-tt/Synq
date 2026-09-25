@@ -209,6 +209,12 @@ type Model struct {
 	githubDeviceCode      string
 	githubPollInterval    int
 
+	// displayName is a purely local, client-side label set via `:name`
+	// and persisted via db.PrefDisplayName - not the server-backed
+	// username system DESIGN.md describes (see that constant's doc
+	// comment). Empty means "never set".
+	displayName string
+
 	quitting bool
 }
 
@@ -233,6 +239,7 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 	// means "never linked", which is exactly what an empty string
 	// already represents - there's nothing to distinguish or report.
 	githubHandle, _ := store.LoadPreference(db.PrefGitHubHandle)
+	displayName, _ := store.LoadPreference(db.PrefDisplayName)
 
 	return Model{
 		identity:       id,
@@ -242,6 +249,7 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		booting:        true,
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
+		displayName:    displayName,
 	}
 }
 
@@ -548,6 +556,33 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return fmt.Sprintf("Theme set to %s, but couldn't save it: %v", palette.Name, err), false, nil
 		}
 		return fmt.Sprintf("Theme set to %s.", palette.Name), false, nil
+
+	case "name":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
+		if len(fields) == 1 {
+			if m.displayName == "" {
+				return "No display name set. Usage: :name <your name> (or :name clear).", false, nil
+			}
+			return fmt.Sprintf("Display name: %s. Usage: :name <your name> (or :name clear).", m.displayName), false, nil
+		}
+		if len(fields) == 2 && fields[1] == "clear" {
+			m.displayName = ""
+			if err := m.store.SavePreference(db.PrefDisplayName, ""); err != nil {
+				return fmt.Sprintf("Cleared for this session, but couldn't save it: %v", err), false, nil
+			}
+			return "Display name cleared.", false, nil
+		}
+		name := strings.Join(fields[1:], " ")
+		m.displayName = name
+		if err := m.store.SavePreference(db.PrefDisplayName, name); err != nil {
+			// Same "still applies this session" reasoning as :theme
+			// above - don't lose or refuse the choice just because
+			// persisting it failed.
+			return fmt.Sprintf("Display name set to %q, but couldn't save it: %v", name, err), false, nil
+		}
+		return fmt.Sprintf("Display name set to %q.", name), false, nil
 
 	case "verify":
 		if m.identity == nil {
@@ -859,8 +894,8 @@ func (m Model) renderContent() string {
 func (m Model) renderProfile() string {
 	if m.identity == nil {
 		return "You're browsing as a guest.\n\n" +
-			"Create an identity to post, chat, build your network, and see\n" +
-			"real usernames on the Feed instead of \"node\".\n\n" +
+			"Create an identity to set a display name, post, chat, build your\n" +
+			"network, and see real usernames on the Feed instead of \"node\".\n\n" +
 			"Restart Synq and choose \"Create your identity\" from the menu.\n\n" +
 			"Theme switching works right now, even as a guest:\n" +
 			"  :theme                  open the interactive theme picker (live preview)\n" +
@@ -868,15 +903,22 @@ func (m Model) renderProfile() string {
 	}
 
 	var b strings.Builder
+	if m.displayName != "" {
+		fmt.Fprintf(&b, "%s\n", m.displayName)
+	} else {
+		b.WriteString("(no display name set - see :name below)\n")
+	}
 	fmt.Fprintf(&b, "Public key:\n%x\n\n", m.identity.SigningPublic)
 	fmt.Fprintf(&b, "Connection: %s\n", connectionLabel(m.connected))
 	fmt.Fprintf(&b, "GitHub: %s\n", m.githubStatusLabel())
 	fmt.Fprintf(&b, "Theme: %s\n\n", m.theme.Palette.Name)
 	b.WriteString("Commands:\n")
+	b.WriteString("  :name <your name>      set your local display name\n")
+	b.WriteString("  :name clear            clear your local display name\n")
 	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
 	b.WriteString("  :github                link your GitHub account\n")
-	b.WriteString("  :theme                  open the interactive theme picker (live preview)\n")
-	b.WriteString("  :theme <name>           set a theme directly\n")
+	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
+	b.WriteString("  :theme <name>          set a theme directly\n")
 	return b.String()
 }
 

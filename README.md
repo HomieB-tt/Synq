@@ -52,7 +52,8 @@ Requires Go 1.23+.
 
 | Command | Does |
 |---|---|
-| `:theme <name>` | Switch color theme. Run `:theme` with no argument to list available themes. Persists across restarts. |
+| `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
+| `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
 | `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:quit` | Same as pressing `q`. |
@@ -83,7 +84,7 @@ synq/
 │   ├── db/             SQLite setup and offline cache queries
 │   ├── ui/
 │   │   ├── components/ feed, chat input, sidebar, and other custom components
-│   │   └── styles/     theme palettes (Dracula, Nord, Monokai)
+│   │   └── styles/     theme palettes (see internal/ui/styles/styles.go for the full list)
 │   └── ws/             WebSocket client connection and reconnect handling
 ├── go.mod
 └── README.md

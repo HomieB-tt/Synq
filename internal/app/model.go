@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"image/color"
 	"os"
 	"strings"
 	"time"
@@ -181,6 +182,17 @@ type Model struct {
 	commandInput string
 	commandMsg   string // last command result/error, shown until the next command
 
+	// themePicker* back the interactive `:theme` popup (see
+	// theme_picker.go): running `:theme` with no argument opens it.
+	// While open, it owns key input the same way commandMode does, and
+	// moving the highlighted entry immediately applies that theme so
+	// the rest of the running UI - tabs, borders, status bar - re-skins
+	// itself live as a preview, before anything is confirmed or saved.
+	themePickerOpen  bool
+	themePickerNames []string
+	themePickerIndex int
+	themePickerPrev  styles.Theme // theme active right before the picker opened; restored on Esc
+
 	// connected reflects whether Synq has a live connection to
 	// synq-server. It is currently a stub that is never set true -
 	// there is no server to connect to yet (see synq-server-DESIGN.md).
@@ -281,6 +293,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// trapping the user in a fixed-duration animation.
 			m.booting = false
 			return m, nil
+		}
+		if m.themePickerOpen {
+			return m.updateThemePicker(msg)
 		}
 		if m.commandMode {
 			return m.updateCommandMode(msg)
@@ -508,8 +523,16 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 	fields := strings.Fields(cmd)
 	switch fields[0] {
 	case "theme":
+		if len(fields) == 1 {
+			// No argument: open the interactive picker instead of just
+			// printing a usage string - see theme_picker.go. The picker
+			// itself is the response, so there's nothing to show in
+			// commandMsg.
+			m.openThemePicker()
+			return "", false, nil
+		}
 		if len(fields) != 2 {
-			return fmt.Sprintf("Usage: :theme <%s>", strings.Join(styles.Names(), "|")), false, nil
+			return fmt.Sprintf("Usage: :theme [<%s>]", strings.Join(styles.Names(), "|")), false, nil
 		}
 		name := strings.ToLower(fields[1])
 		palette, ok := styles.All[name]
@@ -632,6 +655,69 @@ func (m Model) View() tea.View {
 	return v
 }
 
+// placeWithBackground centers block - which may have ragged (unequal-
+// width) lines - within a width x height viewport. This replaces
+// lipgloss.Place for every full-screen placement in this file: Place
+// positions a block correctly but fills the margin it adds around
+// that block - left/right to center it horizontally, top/bottom
+// vertically, and between any of the block's own lines that are
+// shorter than the widest one - with plain, unstyled space. That
+// space carries no background, so it shows the terminal's raw default
+// color instead of the theme's, visible as a stray patch or line next
+// to any centered content (the same class of bug renderHeader's doc
+// comment already describes for horizontal gaps between independently
+// -rendered spans). Every cell placeWithBackground adds instead goes
+// through fill, an explicitly backgrounded style, so nothing is ever
+// left unstyled.
+func placeWithBackground(block string, width, height int, bg color.Color) string {
+	fill := lipgloss.NewStyle().Background(bg)
+
+	lines := strings.Split(block, "\n")
+	blockWidth := 0
+	for _, l := range lines {
+		if w := lipgloss.Width(l); w > blockWidth {
+			blockWidth = w
+		}
+	}
+	if blockWidth > width {
+		blockWidth = width
+	}
+
+	sideGap := width - blockWidth
+	if sideGap < 0 {
+		sideGap = 0
+	}
+	leftMargin := fill.Render(strings.Repeat(" ", sideGap/2))
+	rightMargin := fill.Render(strings.Repeat(" ", sideGap-sideGap/2))
+
+	for i, l := range lines {
+		if gap := blockWidth - lipgloss.Width(l); gap > 0 {
+			l += fill.Render(strings.Repeat(" ", gap))
+		}
+		lines[i] = leftMargin + l + rightMargin
+	}
+
+	topGap := (height - len(lines)) / 2
+	if topGap < 0 {
+		topGap = 0
+	}
+	bottomGap := height - len(lines) - topGap
+	if bottomGap < 0 {
+		bottomGap = 0
+	}
+	blankRow := fill.Render(strings.Repeat(" ", width))
+
+	out := make([]string, 0, topGap+len(lines)+bottomGap)
+	for i := 0; i < topGap; i++ {
+		out = append(out, blankRow)
+	}
+	out = append(out, lines...)
+	for i := 0; i < bottomGap; i++ {
+		out = append(out, blankRow)
+	}
+	return strings.Join(out, "\n")
+}
+
 // renderBoot draws the startup splash: the Synq header, a subtitle,
 // and the current boot message with its spinner, all centered in the
 // terminal. Skippable by pressing any key (see the tea.KeyPressMsg
@@ -640,6 +726,7 @@ func (m Model) renderBoot() string {
 	header := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(m.theme.Palette.Accent).
+		Background(m.theme.Palette.Background).
 		Render("SYNQ")
 
 	subtitle := m.theme.Muted.Render("terminal-native developer network")
@@ -647,13 +734,7 @@ func (m Model) renderBoot() string {
 	msg := bootMessages[m.bootMsgIndex]
 	status := m.theme.StatusBar.Render(spinnerFrames[m.spinnerFrame] + " " + msg)
 
-	block := lipgloss.JoinVertical(lipgloss.Center,
-		header,
-		"",
-		subtitle,
-		"",
-		status,
-	)
+	block := strings.Join([]string{header, "", subtitle, "", status}, "\n")
 
 	width := m.width
 	if width <= 0 {
@@ -664,7 +745,7 @@ func (m Model) renderBoot() string {
 		height = 24
 	}
 
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, block)
+	return placeWithBackground(block, width, height, m.theme.Palette.Background)
 }
 
 func (m Model) renderTabBar() string {
@@ -741,6 +822,10 @@ func (m Model) renderContent() string {
 		height = 3
 	}
 
+	if m.themePickerOpen {
+		return placeWithBackground(m.renderThemePicker(), width, height, m.theme.Palette.Background)
+	}
+
 	var body string
 	switch m.activeTab {
 	case tabFeed:
@@ -778,7 +863,8 @@ func (m Model) renderProfile() string {
 			"real usernames on the Feed instead of \"node\".\n\n" +
 			"Restart Synq and choose \"Create your identity\" from the menu.\n\n" +
 			"Theme switching works right now, even as a guest:\n" +
-			"  :theme <name>          switch color theme"
+			"  :theme                  open the interactive theme picker (live preview)\n" +
+			"  :theme <name>           set a theme directly"
 	}
 
 	var b strings.Builder
@@ -789,7 +875,8 @@ func (m Model) renderProfile() string {
 	b.WriteString("Commands:\n")
 	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
 	b.WriteString("  :github                link your GitHub account\n")
-	b.WriteString("  :theme <name>          switch color theme\n")
+	b.WriteString("  :theme                  open the interactive theme picker (live preview)\n")
+	b.WriteString("  :theme <name>           set a theme directly\n")
 	return b.String()
 }
 

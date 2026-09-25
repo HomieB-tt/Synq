@@ -68,8 +68,10 @@ This document captures the architectural decisions made for the `synq` client du
 
 **Decision:** No automatic detection — Lip Gloss v2 removed automatic background/adaptive-color detection, so this must be handled explicitly.
 
-- On first launch, either prompt the user to pick a theme (Dracula, Nord, Monokai) directly, or issue a one-time `tea.RequestBackgroundColor` and choose a sensible light/dark default from the result.
-- The chosen theme is always overridable later via the command palette.
+- On first launch, either prompt the user to pick a theme directly, or issue a one-time `tea.RequestBackgroundColor` and choose a sensible light/dark default from the result.
+- The chosen theme is always overridable later via the command palette: `:theme <name>` sets one directly, and `:theme` with no argument opens an interactive picker.
+- The picker is a live preview, not just a list: moving the highlighted entry immediately re-derives `Model.theme` from that entry's palette, so the whole running UI (tab bar, borders, status bar) re-skins itself before anything is confirmed. Nothing is persisted to the preferences store until `Enter`; `Esc` restores whichever theme was active before the picker opened, discarding the preview. This reuses the same `styles.All`/`styles.Names()` machinery `:theme <name>` already used, rather than introducing a second, separate theme-listing mechanic - see `internal/app/theme_picker.go`.
+- The `system` palette is a deliberate exception to "no automatic detection": instead of hardcoded hex colors, every field is a base ANSI (0-15) color index, so it renders using whatever colors the user's terminal emulator itself defines for those slots rather than a color Synq ships. It won't look identical across terminals - that's the trade-off the name is describing, not a bug.
 
 ## 8. `$EDITOR` integration
 

@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/lipgloss/v2 v2.0.6
+	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.28.0
 	golang.org/x/term v0.25.0
 	modernc.org/sqlite v1.33.1

@@ -62,6 +62,8 @@ Requires Go 1.23+.
 
 ## Configuration
 
+**`SYNQ_SERVER_URL`** - the WebSocket URL of a synq-server to connect to (e.g. `wss://example.invalid/ws`). Without this set, Synq never attempts a connection and the header's connection indicator stays "offline" permanently - there's no default to fall back to, since `synq-server` doesn't exist as a runnable project yet (see `synq-server-DESIGN.md`). Setting this only gets you a live transport connection: there's no wire message format defined yet (see `internal/ws`'s package doc comment), so Feed/Nodes/Chat still won't show real data even once connected.
+
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 
 To set it up:

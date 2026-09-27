@@ -20,6 +20,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/github"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
+	"github.com/HomieB-tt/synq/internal/ws"
 )
 
 // tab identifies one of the four global views, switched with 1-4 as
@@ -159,6 +160,57 @@ func fetchGitHubUserCmd(token string) tea.Cmd {
 	}
 }
 
+// --- synq-server WebSocket connection (see internal/ws) ---
+//
+// wsClientReadyMsg/wsStatusMsg/wsConnectErrorMsg and the two Cmds
+// below follow the same "async event as a tea.Msg" shape as the
+// GitHub device-flow messages just above, with one addition:
+// waitForWSStatusCmd re-arms itself (returned again from within
+// Update's wsStatusMsg case) rather than firing once, since a
+// WebSocket connection's status can change at any time for the rest
+// of the program's life, unlike a one-shot HTTP poll.
+
+type wsClientReadyMsg struct {
+	client *ws.Client
+}
+
+type wsStatusMsg ws.Status
+
+type wsConnectErrorMsg string
+
+// startWSCmd creates the ws.Client for url and starts its Run loop in
+// a background goroutine for the remaining lifetime of the program -
+// Run only returns once Close is called, which happens on quit (see
+// the "q"/"ctrl+c" and ":quit" handling in updateNormalMode and
+// updateCommandMode). The returned message hands the client back to
+// Update so it can be stored and its Status() channel listened to via
+// waitForWSStatusCmd.
+func startWSCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		client, err := ws.NewClient(url)
+		if err != nil {
+			return wsConnectErrorMsg(fmt.Sprintf("SYNQ_SERVER_URL is invalid: %v", err))
+		}
+		go client.Run(context.Background())
+		return wsClientReadyMsg{client: client}
+	}
+}
+
+// waitForWSStatusCmd blocks for exactly one value from client's
+// Status() channel and returns it as a tea.Msg. It does not loop
+// itself - Update's wsStatusMsg case returns a fresh call to this
+// function to keep listening, the same re-arming pattern
+// githubPollTickCmd uses for polling.
+func waitForWSStatusCmd(client *ws.Client) tea.Cmd {
+	return func() tea.Msg {
+		status, ok := <-client.Status()
+		if !ok {
+			return nil
+		}
+		return wsStatusMsg(status)
+	}
+}
+
 // Model is the Bubble Tea root model for the whole application.
 type Model struct {
 	identity *crypto.Identity
@@ -194,11 +246,14 @@ type Model struct {
 	themePickerPrev  styles.Theme // theme active right before the picker opened; restored on Esc
 
 	// connected reflects whether Synq has a live connection to
-	// synq-server. It is currently a stub that is never set true -
-	// there is no server to connect to yet (see synq-server-DESIGN.md).
-	// It exists now so the UI has a place to show real status the
-	// moment a real WS client exists, without a later layout change.
-	connected bool
+	// synq-server, driven by wsClient's Status() channel (see
+	// startWSCmd/waitForWSStatusCmd). It stays permanently false, and
+	// wsClient stays nil, when wsServerURL is empty - i.e. for anyone
+	// not setting SYNQ_SERVER_URL, this is the same "no server" stub
+	// behavior as before the WS client existed.
+	connected   bool
+	wsServerURL string // from SYNQ_SERVER_URL; empty means "not configured"
+	wsClient    *ws.Client
 
 	// GitHub verification (synq-DESIGN.md section 9). Optional, and
 	// entirely separate from Synq's own identity/auth.
@@ -250,6 +305,7 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
 		displayName:    displayName,
+		wsServerURL:    os.Getenv("SYNQ_SERVER_URL"),
 	}
 }
 
@@ -262,10 +318,15 @@ func Run(id *crypto.Identity, store *db.KeyStore) error {
 }
 
 // Init requests the terminal's background color so the theme can pick
-// a sensible starting point (DESIGN.md section 7), and kicks off the
-// startup splash animation.
+// a sensible starting point (DESIGN.md section 7), kicks off the
+// startup splash animation, and - if SYNQ_SERVER_URL is set - starts
+// connecting to synq-server (see startWSCmd).
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, bootTick())
+	cmds := []tea.Cmd{tea.RequestBackgroundColor, bootTick()}
+	if m.wsServerURL != "" {
+		cmds = append(cmds, startWSCmd(m.wsServerURL))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model.
@@ -286,6 +347,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case githubUserMsg:
 		return m.handleGitHubUser(msg)
+
+	case wsConnectErrorMsg:
+		// Nothing the user can do about a malformed SYNQ_SERVER_URL
+		// from inside the running TUI - surface it the same one-line
+		// way a misconfigured GitHub client ID would be, rather than
+		// crashing or silently staying "disconnected" with no
+		// explanation.
+		m.commandMsg = string(msg)
+		return m, nil
+
+	case wsClientReadyMsg:
+		m.wsClient = msg.client
+		return m, waitForWSStatusCmd(msg.client)
+
+	case wsStatusMsg:
+		status := ws.Status(msg)
+		m.connected = status == ws.StatusConnected
+		if status == ws.StatusClosed {
+			// The client has fully shut down (see Client.Run's doc
+			// comment: StatusClosed is always last) and its Status()
+			// channel will never produce another value - re-arming
+			// waitForWSStatusCmd here would just block forever on a
+			// goroutine nothing will ever wake again.
+			return m, nil
+		}
+		return m, waitForWSStatusCmd(m.wsClient)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -454,6 +541,9 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
+		if m.wsClient != nil {
+			m.wsClient.Close()
+		}
 		return m, tea.Quit
 
 	case "1":
@@ -495,6 +585,9 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.commandInput = ""
 		if quit {
 			m.quitting = true
+			if m.wsClient != nil {
+				m.wsClient.Close()
+			}
 			return m, tea.Quit
 		}
 		return m, cmd
@@ -797,9 +890,10 @@ func (m Model) renderTabBar() string {
 }
 
 // renderHeader combines the tab bar (left) with the connection status
-// (right), spanning the full terminal width. connected is currently
-// always false (see the Model.connected doc comment) - the dot and
-// label are real UI, just wired to a stub for now.
+// (right), spanning the full terminal width. connected reflects a real
+// ws.Client connection when SYNQ_SERVER_URL is set (see Model.connected
+// and startWSCmd) - and stays permanently false, same as before that
+// existed, when it isn't.
 //
 // Every separator between independently-rendered spans uses an
 // explicitly backgrounded style, not a bare " " - a plain space

@@ -15,7 +15,7 @@ Synq gives you four core views, all reachable without touching a mouse:
 
 ## Why terminal-native
 
-Synq is built for developers who live in a terminal. Every interaction — navigation, posting, messaging, command invocation — is keyboard-first, fast, and scriptable. It's meant to sit alongside `vim`, `tmux`, and `git`, not replace a browser tab.
+Synq is built for developers who live in the terminal/CLI. Every interaction ( navigation, posting, messaging, command invocation) is keyboard-first, fast, and scriptable. It's meant to sit alongside `vim`, `tmux`, and `git`, not replace a browser tab.
 
 ## Security model
 
@@ -27,7 +27,7 @@ Synq is built for developers who live in a terminal. Every interaction — navig
 ## Tech stack
 
 | Purpose | Library |
-|---|---|
+| --- | --- |
 | TUI / Elm-architecture state engine | `charm.land/bubbletea/v2` |
 | Styling & layout | `charm.land/lipgloss/v2` |
 | Form components & inputs | `charm.land/bubbles/v2` |
@@ -41,7 +41,7 @@ Requires Go 1.23+.
 ## Keyboard reference
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `1` `2` `3` `4` | Switch to Feed / Nodes / Chat / Profile |
 | `Tab` / `Shift+Tab` | Move focus between panes |
 | `:` or `Ctrl+P` | Open command palette |
@@ -51,26 +51,29 @@ Requires Go 1.23+.
 ## Command palette
 
 | Command | Does |
-|---|---|
+| --- | --- |
 | `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
 | `:name <your name>` | Set a local display name, shown in your own Profile tab. This is purely a local label - not the server-backed username system (see `DESIGN.md`), since `synq-server` doesn't exist yet to assign or verify one. |
 | `:name clear` | Clear your local display name. |
 | `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
+| `:chat <hex-pubkey>` | Open an existing thread with a contact, or start a new one, by their hex-encoded X25519 (not signing) public key. Chat history is session-only (see `DESIGN.md` section 4) and, for now, local only - composing and sending a message appends it to your own view, but nothing is actually transmitted yet, since the WS wire message format `synq-server` expects isn't wired up in `internal/ws` yet. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:quit` | Same as pressing `q`. |
 
 ## Configuration
 
-**`SYNQ_SERVER_URL`** - the WebSocket URL of a synq-server to connect to (e.g. `wss://example.invalid/ws`). Without this set, Synq never attempts a connection and the header's connection indicator stays "offline" permanently - there's no default to fall back to, since `synq-server` doesn't exist as a runnable project yet (see `synq-server-DESIGN.md`). Setting this only gets you a live transport connection: there's no wire message format defined yet (see `internal/ws`'s package doc comment), so Feed/Nodes/Chat still won't show real data even once connected.
+**`SYNQ_SERVER_URL`** - the WebSocket URL of the synq-server to connect to (e.g. `wss://example.invalid/ws`). Without this set, Synq never attempts a connection and the header's connection indicator stays "offline" permanently - there's no default to fall back to, since `synq-server` doesn't exist as a runnable project yet (see `synq-server-DESIGN.md`). Setting this only gets you a live transport connection: there's no wire message format defined yet (see `internal/ws`'s package doc comment), so Feed/Nodes/Chat still won't show real data even once connected.
 
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 
 To set it up:
+
 1. On GitHub, go to **Settings → Developer settings → OAuth Apps → New OAuth App** (a plain OAuth App, not a GitHub App).
 2. Fill in a name and homepage URL (anything - GitHub requires a value here, but the Device Flow used by Synq never redirects to it).
 3. After creating the app, enable **"Enable Device Flow"** in its settings. This is off by default and the flow will fail without it.
 4. Copy the **Client ID** (not the client secret - Device Flow doesn't use one) and set it before running Synq:
+
    ```
    export SYNQ_GITHUB_CLIENT_ID=your_client_id_here
    ```

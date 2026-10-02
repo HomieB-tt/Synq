@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/github"
@@ -270,6 +271,22 @@ type Model struct {
 	// comment). Empty means "never set".
 	displayName string
 
+	// Chat (DESIGN.md section 4). chatStore is created once in New and
+	// purged on quit alongside wsClient.Close() - nothing here is ever
+	// persisted to db.KeyStore. chatActive is empty when the Chat tab
+	// should show the thread list rather than an open conversation.
+	//
+	// There is no wire protocol wired up yet for actually sending or
+	// receiving a chat message (see internal/ws's package doc comment)
+	// - opening a thread with `:chat <hex-pubkey>` and composing into
+	// it is real, tested, local UI and storage, but sending currently
+	// only appends to chatStore as a local echo. See the TODO in
+	// updateChatCompose's "enter" case for exactly where that changes
+	// once synq-server's message envelope is known.
+	chatStore  *chat.Store
+	chatActive chat.ContactKey
+	chatInput  string
+
 	quitting bool
 }
 
@@ -306,6 +323,7 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		githubHandle:   githubHandle,
 		displayName:    displayName,
 		wsServerURL:    os.Getenv("SYNQ_SERVER_URL"),
+		chatStore:      chat.NewStore(),
 	}
 }
 
@@ -394,6 +412,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.commandMode {
 			return m.updateCommandMode(msg)
+		}
+		if m.activeTab == tabChat && m.chatActive != "" {
+			return m.updateChatCompose(msg)
 		}
 		return m.updateNormalMode(msg)
 	}
@@ -544,6 +565,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.wsClient != nil {
 			m.wsClient.Close()
 		}
+		m.chatStore.Purge()
 		return m, tea.Quit
 
 	case "1":
@@ -588,6 +610,7 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.wsClient != nil {
 				m.wsClient.Close()
 			}
+			m.chatStore.Purge()
 			return m, tea.Quit
 		}
 		return m, cmd
@@ -606,6 +629,61 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// appended.
 	if msg.Text != "" {
 		m.commandInput += msg.Text
+	}
+
+	return m, nil
+}
+
+// updateChatCompose handles keys while a chat thread is open (Chat tab
+// active, m.chatActive non-empty) - the same "own all key input while
+// this mode is active" pattern updateCommandMode and updateThemePicker
+// use, so normal-mode keys like "1" or "tab" type into the message
+// instead of switching tabs out from under it.
+func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Back to the thread list, not out of the Chat tab entirely -
+		// symmetric with how Esc closes the theme picker back to
+		// whatever was showing before, not all the way out of Profile.
+		m.chatActive = ""
+		m.chatInput = ""
+		return m, nil
+
+	case "enter":
+		body := strings.TrimSpace(m.chatInput)
+		m.chatInput = ""
+		if body == "" {
+			return m, nil
+		}
+		m.chatStore.Append(m.chatActive, chat.Message{
+			Body:     []byte(body),
+			At:       time.Now(),
+			Outgoing: true,
+		})
+		// TODO(wire protocol): this only appends locally for now.
+		// Actually transmitting it - sealing with SealMessage under
+		// the session key from DeriveSessionKey, then sending it
+		// through wsClient in whatever envelope synq-server's WS
+		// protocol turns out to expect - is the one piece still
+		// waiting on that protocol being specified. See internal/ws's
+		// package doc comment.
+		return m, nil
+
+	case "backspace":
+		if len(m.chatInput) > 0 {
+			// Trim one rune, not one byte, so multi-byte UTF-8 input
+			// (emoji, accented characters) doesn't get corrupted into
+			// an invalid partial sequence - see commandInput's own
+			// backspace case just above for the simpler byte-slice
+			// version this deliberately doesn't copy.
+			r := []rune(m.chatInput)
+			m.chatInput = string(r[:len(r)-1])
+		}
+		return m, nil
+	}
+
+	if msg.Text != "" {
+		m.chatInput += msg.Text
 	}
 
 	return m, nil
@@ -691,6 +769,26 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		fp := crypto.Fingerprint(m.identity.SigningPublic, theirKey)
 		return fmt.Sprintf("Fingerprint: %s", fp), false, nil
 
+	case "chat":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
+		if len(fields) != 2 {
+			return "Usage: :chat <contact's hex-encoded X25519 public key>", false, nil
+		}
+		contactPub, err := decodeHexBoxPublicKey(fields[1])
+		if err != nil {
+			return fmt.Sprintf("Invalid public key: %v", err), false, nil
+		}
+		contact := chat.NewContactKey(contactPub)
+		isNew := !m.chatStore.HasThread(contact)
+		m.activeTab = tabChat
+		m.chatActive = contact
+		if isNew {
+			return fmt.Sprintf("Started a new thread with %s.", fields[1]), false, nil
+		}
+		return fmt.Sprintf("Opened your thread with %s.", fields[1]), false, nil
+
 	case "github":
 		if m.identity == nil {
 			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
@@ -728,6 +826,27 @@ func decodeHexPublicKey(s string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("expected %d bytes, got %d", ed25519.PublicKeySize, len(raw))
 	}
 	return ed25519.PublicKey(raw), nil
+}
+
+// decodeHexBoxPublicKey parses a hex-encoded X25519 public key - the
+// "static" key DESIGN.md section 3's handshake, and chat.ContactKey,
+// both key off of. Kept separate from decodeHexPublicKey just above,
+// which parses an Ed25519 *signing* key for :verify's fingerprint
+// comparison: both happen to be 32 bytes, but conflating the two key
+// types because the encoding is the same size would be a real,
+// easy-to-miss correctness bug - an identity's signing key and its
+// key-exchange key are never interchangeable.
+func decodeHexBoxPublicKey(s string) (*[32]byte, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("not valid hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("expected 32 bytes, got %d", len(raw))
+	}
+	var key [32]byte
+	copy(key[:], raw)
+	return &key, nil
 }
 
 // nextTab cycles through allTabs by delta (1 forward, -1 backward),
@@ -972,7 +1091,7 @@ func (m Model) renderContent() string {
 		if m.identity == nil {
 			body = "Create an identity to send encrypted messages. Restart Synq and choose \"Create your identity.\""
 		} else {
-			body = "No open chats. Chat history is session-only - see DESIGN.md section 4."
+			body = m.renderChat()
 		}
 	case tabProfile:
 		body = m.renderProfile()
@@ -983,6 +1102,77 @@ func (m Model) renderContent() string {
 		Height(height).
 		Padding(1, 2).
 		Render(body)
+}
+
+// renderChat draws the Chat tab: the thread list when no thread is
+// open (m.chatActive == ""), or one open conversation plus its compose
+// input otherwise. See updateChatCompose for the key handling this
+// pairs with, and the Model.chatStore doc comment for what "session-
+// only" and "not yet connected" mean here.
+func (m Model) renderChat() string {
+	if m.chatActive == "" {
+		threads := m.chatStore.Threads()
+		if len(threads) == 0 {
+			return "No open chats. Chat history is session-only - see DESIGN.md section 4.\n\n" +
+				"Start one with :chat <contact's hex-encoded X25519 public key>."
+		}
+
+		var b strings.Builder
+		b.WriteString("Chats:\n\n")
+		for _, contact := range threads {
+			msgs := m.chatStore.Messages(contact)
+			last := msgs[len(msgs)-1]
+			fmt.Fprintf(&b, "  %s  (%d) %s\n", shortenContactKey(contact), len(msgs), truncateRunes(string(last.Body), 40))
+		}
+		b.WriteString("\nOpen one with :chat <hex-pubkey>.")
+		return b.String()
+	}
+
+	msgs := m.chatStore.Messages(m.chatActive)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Chat with %s\n", shortenContactKey(m.chatActive))
+	b.WriteString(m.theme.Muted.Render("Not yet connected to synq-server chat - messages stay local only for now.") + "\n\n")
+
+	if len(msgs) == 0 {
+		b.WriteString("(no messages yet)\n")
+	}
+	for _, msg := range msgs {
+		who := "them"
+		if msg.Outgoing {
+			who = "you"
+		}
+		fmt.Fprintf(&b, "[%s] %s: %s\n", msg.At.Format("15:04:05"), who, msg.Body)
+	}
+
+	fmt.Fprintf(&b, "\n> %s\n", m.chatInput)
+	b.WriteString(m.theme.Muted.Render("enter send (local only) · esc back to chat list"))
+	return b.String()
+}
+
+// shortenContactKey abbreviates a full hex-encoded public key for
+// display (e.g. in the thread list) - plain byte-slicing is safe here
+// specifically because a ContactKey is always hex, and hex is always
+// single-byte ASCII, unlike message bodies elsewhere in this file that
+// need rune-aware handling.
+func shortenContactKey(c chat.ContactKey) string {
+	s := string(c)
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:8] + "…" + s[len(s)-4:]
+}
+
+// truncateRunes shortens s to at most n runes, appending an ellipsis if
+// it was cut. Rune-, not byte-, based so truncating a message preview
+// containing multi-byte UTF-8 (emoji, accented characters) can't slice
+// through the middle of one and produce invalid text.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func (m Model) renderProfile() string {
@@ -1010,6 +1200,7 @@ func (m Model) renderProfile() string {
 	b.WriteString("  :name <your name>      set your local display name\n")
 	b.WriteString("  :name clear            clear your local display name\n")
 	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
+	b.WriteString("  :chat <hex-pubkey>     open or start a chat thread (local only for now)\n")
 	b.WriteString("  :github                link your GitHub account\n")
 	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
 	b.WriteString("  :theme <name>          set a theme directly\n")

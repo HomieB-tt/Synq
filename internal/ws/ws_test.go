@@ -125,8 +125,10 @@ func TestClientReconnectsAfterServerDrop(t *testing.T) {
 	t.Cleanup(func() { MinBackoff, MaxBackoff = oldMin, oldMax })
 
 	var connections int32
+	accepted := make(chan struct{}, 2)
 	srv := newEchoServer(t, func(conn *websocket.Conn) {
 		n := atomic.AddInt32(&connections, 1)
+		accepted <- struct{}{}
 		if n == 1 {
 			// Drop the first connection immediately, with no
 			// handshake at the application level - this is what a
@@ -163,8 +165,18 @@ func TestClientReconnectsAfterServerDrop(t *testing.T) {
 	// First connect, then the forced drop, then Run should reconnect
 	// on its own without anything external telling it to.
 	waitForStatus(t, c, StatusConnected, 2*time.Second)
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the server to accept the first connection")
+	}
 	waitForStatus(t, c, StatusDisconnected, 2*time.Second)
 	waitForStatus(t, c, StatusConnected, 2*time.Second)
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the server to accept the reconnected connection")
+	}
 
 	if got := atomic.LoadInt32(&connections); got < 2 {
 		t.Fatalf("expected at least 2 connection attempts to reach the server, got %d", got)

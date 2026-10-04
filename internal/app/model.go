@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"image/color"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/HomieB-tt/synq/internal/api"
+	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/github"
@@ -178,16 +181,51 @@ type wsStatusMsg ws.Status
 
 type wsConnectErrorMsg string
 
-// startWSCmd creates the ws.Client for url and starts its Run loop in
-// a background goroutine for the remaining lifetime of the program -
-// Run only returns once Close is called, which happens on quit (see
-// the "q"/"ctrl+c" and ":quit" handling in updateNormalMode and
-// updateCommandMode). The returned message hands the client back to
-// Update so it can be stored and its Status() channel listened to via
-// waitForWSStatusCmd.
-func startWSCmd(url string) tea.Cmd {
+// deriveWSURL builds synq-server's WebSocket URL from its REST base
+// URL (SYNQ_SERVER_URL / apiClient.BaseURL): same host, /ws path,
+// scheme swapped from http/https to ws/wss, and accessToken attached
+// as the ?token=... query parameter synq-server's upgrade handler
+// expects. Returns an error if baseURL doesn't parse, or uses a scheme
+// other than http/https - there's no sensible ws(s) equivalent to fall
+// back to in that case.
+func deriveWSURL(baseURL, accessToken string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse %q: %w", baseURL, err)
+	}
+
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	default:
+		return "", fmt.Errorf("unsupported scheme %q (expected http or https)", u.Scheme)
+	}
+
+	u.Path = "/ws"
+	q := url.Values{}
+	q.Set("token", accessToken)
+	u.RawQuery = q.Encode()
+
+	return u.String(), nil
+}
+
+// startWSCmd creates the ws.Client for synq-server's WS endpoint,
+// derived from baseURL and accessToken (see deriveWSURL), and starts
+// its Run loop in a background goroutine for the remaining lifetime of
+// the program - Run only returns once Close is called, which happens
+// on quit (see the "q"/"ctrl+c" and ":quit" handling in
+// updateNormalMode and updateCommandMode). The returned message hands
+// the client back to Update so it can be stored and its Status()
+// channel listened to via waitForWSStatusCmd.
+func startWSCmd(baseURL, accessToken string) tea.Cmd {
 	return func() tea.Msg {
-		client, err := ws.NewClient(url)
+		wsURL, err := deriveWSURL(baseURL, accessToken)
+		if err != nil {
+			return wsConnectErrorMsg(fmt.Sprintf("SYNQ_SERVER_URL is invalid: %v", err))
+		}
+		client, err := ws.NewClient(wsURL)
 		if err != nil {
 			return wsConnectErrorMsg(fmt.Sprintf("SYNQ_SERVER_URL is invalid: %v", err))
 		}
@@ -245,15 +283,42 @@ type Model struct {
 	themePickerIndex int
 	themePickerPrev  styles.Theme // theme active right before the picker opened; restored on Esc
 
-	// connected reflects whether Synq has a live connection to
+	// connected reflects whether Synq has a live WS connection to
 	// synq-server, driven by wsClient's Status() channel (see
-	// startWSCmd/waitForWSStatusCmd). It stays permanently false, and
-	// wsClient stays nil, when wsServerURL is empty - i.e. for anyone
-	// not setting SYNQ_SERVER_URL, this is the same "no server" stub
-	// behavior as before the WS client existed.
-	connected   bool
-	wsServerURL string // from SYNQ_SERVER_URL; empty means "not configured"
-	wsClient    *ws.Client
+	// startWSCmd/waitForWSStatusCmd). The WS connection itself is only
+	// ever attempted once accessToken is non-empty (see Init) - a
+	// guest, or an identity that has never registered or isn't
+	// currently logged in, never gets a WS connection at all, matching
+	// synq-server requiring ?token=... on the upgrade request.
+	connected bool
+	wsClient  *ws.Client
+
+	// apiClient is synq-server's REST client (internal/api), nil if
+	// SYNQ_SERVER_URL isn't configured - the same "stays off, zero
+	// behavior change" default every optional integration here
+	// follows. Unlike wsClient, this is safe to use even for a guest
+	// (api.Client.ListFeed accepts an empty access token) or an
+	// identity that hasn't logged in yet (e.g. :register itself calls
+	// through this with no token at all).
+	apiClient *api.Client
+
+	// username is the name this identity has registered with
+	// synq-server (db.PrefUsername), or "" if it never has - distinct
+	// from displayName below; see PrefUsername's doc comment for why
+	// conflating the two would be a real bug, not just a style choice.
+	//
+	// accessToken is intentionally never persisted anywhere, by
+	// Model - not to db.KeyStore's preferences table (plaintext,
+	// wrong trust level for a bearer credential even if this value
+	// weren't short-lived anyway) and not to the identity vault either
+	// (unlike the refresh token - see crypto.SealIdentity's doc
+	// comment): Model never holds the vault passphrase at all (see
+	// Session's doc comment), so re-sealing the vault to persist
+	// anything is categorically not something Model can do. It lives
+	// in memory only, for the life of the process, exactly like the
+	// design calls for.
+	username    string
+	accessToken string
 
 	// GitHub verification (synq-DESIGN.md section 9). Optional, and
 	// entirely separate from Synq's own identity/auth.
@@ -270,19 +335,48 @@ type Model struct {
 	// comment). Empty means "never set".
 	displayName string
 
+	// Chat (DESIGN.md section 4). chatStore is created once in New and
+	// purged on quit alongside wsClient.Close() - nothing here is ever
+	// persisted to db.KeyStore. chatActive is empty when the Chat tab
+	// should show the thread list rather than an open conversation.
+	//
+	// There is no wire protocol wired up yet for actually sending or
+	// receiving a chat message (see internal/ws's package doc comment)
+	// - opening a thread with `:chat <hex-pubkey>` and composing into
+	// it is real, tested, local UI and storage, but sending currently
+	// only appends to chatStore as a local echo. See the TODO in
+	// updateChatCompose's "enter" case for exactly where that changes
+	// once synq-server's message envelope is known.
+	chatStore  *chat.Store
+	chatActive chat.ContactKey
+	chatInput  string
+
+	// chatUsernames remembers the username a contact was resolved
+	// through via `:chat <username>` (see handleChatResolveResult), so
+	// the thread list can display it instead of chat.ContactKey's raw
+	// hex public key. Purely a display convenience - chat.Store itself
+	// is keyed by ContactKey regardless, since that's what the
+	// handshake and encryption actually need; a username is never a
+	// substitute for the key itself. Not persisted - like chatStore,
+	// this starts empty every launch.
+	chatUsernames map[chat.ContactKey]string
+
 	quitting bool
 }
 
 // New builds the initial root model for a given, already-unlocked
 // identity (see cmd/synq/main.go for the passphrase bootstrap that
-// produces it) and the same KeyStore that identity was loaded from,
-// which also holds non-secret preferences like the selected theme.
+// produces it), the same KeyStore that identity was loaded from (which
+// also holds non-secret preferences like the selected theme), and the
+// Session main.go already resolved - see that type's doc comment for
+// why establishing it is main.go's job, not something Model goes on to
+// do for itself.
 //
 // The saved theme (if any) is loaded here, synchronously, rather than
 // via a tea.Cmd - this runs once, before the program starts, not
 // during the event loop, so there's no risk of it blocking input
 // handling.
-func New(id *crypto.Identity, store *db.KeyStore) Model {
+func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 	theme := styles.Default()
 	if name, err := store.LoadPreference(db.PrefTheme); err == nil {
 		if palette, ok := styles.All[name]; ok {
@@ -305,26 +399,36 @@ func New(id *crypto.Identity, store *db.KeyStore) Model {
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
 		displayName:    displayName,
-		wsServerURL:    os.Getenv("SYNQ_SERVER_URL"),
+		apiClient:      session.API,
+		username:       session.Username,
+		accessToken:    session.AccessToken,
+		chatStore:      chat.NewStore(),
 	}
 }
 
 // Run starts the Bubble Tea program. This is the hand-off point from
-// the passphrase bootstrap in cmd/synq/main.go into the interactive
-// TUI.
-func Run(id *crypto.Identity, store *db.KeyStore) error {
-	_, err := tea.NewProgram(New(id, store)).Run()
+// the passphrase bootstrap and session resolution in cmd/synq/main.go
+// into the interactive TUI.
+func Run(id *crypto.Identity, store *db.KeyStore, session Session) error {
+	_, err := tea.NewProgram(New(id, store, session)).Run()
 	return err
 }
 
 // Init requests the terminal's background color so the theme can pick
 // a sensible starting point (DESIGN.md section 7), kicks off the
-// startup splash animation, and - if SYNQ_SERVER_URL is set - starts
-// connecting to synq-server (see startWSCmd).
+// startup splash animation, and - only once there's an access token
+// already in hand (main.go's automatic login/refresh, or a `:register`/
+// `:login` run earlier in this same session) - starts connecting to
+// synq-server (see startWSCmd). A guest, or an identity that hasn't
+// registered or isn't currently logged in, never gets a WS connection
+// attempt at all: synq-server's upgrade handler requires ?token=...,
+// so attempting one with no token would just fail anyway, and the
+// REST side (api.Client.ListFeed) already covers anonymous Feed
+// browsing without needing a socket at all.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tea.RequestBackgroundColor, bootTick()}
-	if m.wsServerURL != "" {
-		cmds = append(cmds, startWSCmd(m.wsServerURL))
+	if m.apiClient != nil && m.accessToken != "" {
+		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
 	}
 	return tea.Batch(cmds...)
 }
@@ -347,6 +451,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case githubUserMsg:
 		return m.handleGitHubUser(msg)
+
+	case registerResultMsg:
+		return m.handleRegisterResult(msg)
+
+	case loginResultMsg:
+		return m.handleLoginResult(msg)
+
+	case logoutResultMsg:
+		return m.handleLogoutResult(msg)
+
+	case chatResolveResultMsg:
+		return m.handleChatResolveResult(msg)
 
 	case wsConnectErrorMsg:
 		// Nothing the user can do about a malformed SYNQ_SERVER_URL
@@ -394,6 +510,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.commandMode {
 			return m.updateCommandMode(msg)
+		}
+		if m.activeTab == tabChat && m.chatActive != "" {
+			return m.updateChatCompose(msg)
 		}
 		return m.updateNormalMode(msg)
 	}
@@ -544,6 +663,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.wsClient != nil {
 			m.wsClient.Close()
 		}
+		m.chatStore.Purge()
 		return m, tea.Quit
 
 	case "1":
@@ -588,6 +708,7 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.wsClient != nil {
 				m.wsClient.Close()
 			}
+			m.chatStore.Purge()
 			return m, tea.Quit
 		}
 		return m, cmd
@@ -606,6 +727,61 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// appended.
 	if msg.Text != "" {
 		m.commandInput += msg.Text
+	}
+
+	return m, nil
+}
+
+// updateChatCompose handles keys while a chat thread is open (Chat tab
+// active, m.chatActive non-empty) - the same "own all key input while
+// this mode is active" pattern updateCommandMode and updateThemePicker
+// use, so normal-mode keys like "1" or "tab" type into the message
+// instead of switching tabs out from under it.
+func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		// Back to the thread list, not out of the Chat tab entirely -
+		// symmetric with how Esc closes the theme picker back to
+		// whatever was showing before, not all the way out of Profile.
+		m.chatActive = ""
+		m.chatInput = ""
+		return m, nil
+
+	case "enter":
+		body := strings.TrimSpace(m.chatInput)
+		m.chatInput = ""
+		if body == "" {
+			return m, nil
+		}
+		m.chatStore.Append(m.chatActive, chat.Message{
+			Body:     []byte(body),
+			At:       time.Now(),
+			Outgoing: true,
+		})
+		// TODO(wire protocol): this only appends locally for now.
+		// Actually transmitting it - sealing with SealMessage under
+		// the session key from DeriveSessionKey, then sending it
+		// through wsClient in whatever envelope synq-server's WS
+		// protocol turns out to expect - is the one piece still
+		// waiting on that protocol being specified. See internal/ws's
+		// package doc comment.
+		return m, nil
+
+	case "backspace":
+		if len(m.chatInput) > 0 {
+			// Trim one rune, not one byte, so multi-byte UTF-8 input
+			// (emoji, accented characters) doesn't get corrupted into
+			// an invalid partial sequence - see commandInput's own
+			// backspace case just above for the simpler byte-slice
+			// version this deliberately doesn't copy.
+			r := []rune(m.chatInput)
+			m.chatInput = string(r[:len(r)-1])
+		}
+		return m, nil
+	}
+
+	if msg.Text != "" {
+		m.chatInput += msg.Text
 	}
 
 	return m, nil
@@ -691,6 +867,57 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		fp := crypto.Fingerprint(m.identity.SigningPublic, theirKey)
 		return fmt.Sprintf("Fingerprint: %s", fp), false, nil
 
+	case "chat":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
+		if len(fields) != 2 {
+			return "Usage: :chat <username>", false, nil
+		}
+		if m.apiClient == nil {
+			return "Chat needs synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", false, nil
+		}
+		if m.accessToken == "" {
+			return "Log in first - :register <username> if you haven't registered, or :login if you have.", false, nil
+		}
+		return fmt.Sprintf("Looking up %s...", fields[1]), false, resolveChatContactCmd(m.apiClient, m.accessToken, fields[1])
+
+	case "register":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
+		if m.apiClient == nil {
+			return "Registration needs synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", false, nil
+		}
+		if m.username != "" {
+			return fmt.Sprintf("Already registered as %s.", m.username), false, nil
+		}
+		if len(fields) != 2 {
+			return "Usage: :register <username> (this is permanent - synq-server has no rename yet)", false, nil
+		}
+		return fmt.Sprintf("Registering as %s...", fields[1]), false, registerUsernameCmd(m.apiClient, m.identity, fields[1])
+
+	case "login":
+		if m.identity == nil {
+			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+		}
+		if m.apiClient == nil {
+			return "Login needs synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", false, nil
+		}
+		if m.username == "" {
+			return "Not registered yet - use :register <username> first.", false, nil
+		}
+		if m.accessToken != "" {
+			return fmt.Sprintf("Already logged in as %s.", m.username), false, nil
+		}
+		return "Logging in...", false, loginCmd(m.apiClient, m.identity, m.username)
+
+	case "logout":
+		if m.accessToken == "" {
+			return "Not logged in.", false, nil
+		}
+		return "Logging out...", false, logoutCmd(m.apiClient, m.accessToken)
+
 	case "github":
 		if m.identity == nil {
 			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
@@ -728,6 +955,27 @@ func decodeHexPublicKey(s string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("expected %d bytes, got %d", ed25519.PublicKeySize, len(raw))
 	}
 	return ed25519.PublicKey(raw), nil
+}
+
+// decodeHexBoxPublicKey parses a hex-encoded X25519 public key - the
+// "static" key DESIGN.md section 3's handshake, and chat.ContactKey,
+// both key off of. Kept separate from decodeHexPublicKey just above,
+// which parses an Ed25519 *signing* key for :verify's fingerprint
+// comparison: both happen to be 32 bytes, but conflating the two key
+// types because the encoding is the same size would be a real,
+// easy-to-miss correctness bug - an identity's signing key and its
+// key-exchange key are never interchangeable.
+func decodeHexBoxPublicKey(s string) (*[32]byte, error) {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("not valid hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("expected 32 bytes, got %d", len(raw))
+	}
+	var key [32]byte
+	copy(key[:], raw)
+	return &key, nil
 }
 
 // nextTab cycles through allTabs by delta (1 forward, -1 backward),
@@ -972,7 +1220,7 @@ func (m Model) renderContent() string {
 		if m.identity == nil {
 			body = "Create an identity to send encrypted messages. Restart Synq and choose \"Create your identity.\""
 		} else {
-			body = "No open chats. Chat history is session-only - see DESIGN.md section 4."
+			body = m.renderChat()
 		}
 	case tabProfile:
 		body = m.renderProfile()
@@ -983,6 +1231,91 @@ func (m Model) renderContent() string {
 		Height(height).
 		Padding(1, 2).
 		Render(body)
+}
+
+// renderChat draws the Chat tab: the thread list when no thread is
+// open (m.chatActive == ""), or one open conversation plus its compose
+// input otherwise. See updateChatCompose for the key handling this
+// pairs with, and the Model.chatStore doc comment for what "session-
+// only" and "not yet connected" mean here.
+func (m Model) renderChat() string {
+	if m.chatActive == "" {
+		threads := m.chatStore.Threads()
+		if len(threads) == 0 {
+			return "No open chats. Chat history is session-only - see DESIGN.md section 4.\n\n" +
+				"Start one with :chat <username>."
+		}
+
+		var b strings.Builder
+		b.WriteString("Chats:\n\n")
+		for _, contact := range threads {
+			msgs := m.chatStore.Messages(contact)
+			last := msgs[len(msgs)-1]
+			fmt.Fprintf(&b, "  %s  (%d) %s\n", m.chatContactLabel(contact), len(msgs), truncateRunes(string(last.Body), 40))
+		}
+		b.WriteString("\nOpen one with :chat <username>.")
+		return b.String()
+	}
+
+	msgs := m.chatStore.Messages(m.chatActive)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Chat with %s\n", m.chatContactLabel(m.chatActive))
+	b.WriteString(m.theme.Muted.Render("Not yet connected to synq-server chat - messages stay local only for now.") + "\n\n")
+
+	if len(msgs) == 0 {
+		b.WriteString("(no messages yet)\n")
+	}
+	for _, msg := range msgs {
+		who := "them"
+		if msg.Outgoing {
+			who = "you"
+		}
+		fmt.Fprintf(&b, "[%s] %s: %s\n", msg.At.Format("15:04:05"), who, msg.Body)
+	}
+
+	fmt.Fprintf(&b, "\n> %s\n", m.chatInput)
+	b.WriteString(m.theme.Muted.Render("enter send (local only) · esc back to chat list"))
+	return b.String()
+}
+
+// chatContactLabel displays contact by whatever username it was last
+// resolved through (see handleChatResolveResult), falling back to its
+// shortened raw key if none is on file - e.g. for a thread that
+// predates this lookup ever happening (shouldn't occur today, since
+// :chat requires a successful lookup to open a thread at all, but
+// chat.ContactKey itself doesn't depend on a username ever having been
+// known, so this stays correct even if that changes later).
+func (m Model) chatContactLabel(contact chat.ContactKey) string {
+	if username, ok := m.chatUsernames[contact]; ok {
+		return username
+	}
+	return shortenContactKey(contact)
+}
+
+// shortenContactKey abbreviates a full hex-encoded public key for
+// display (e.g. in the thread list) - plain byte-slicing is safe here
+// specifically because a ContactKey is always hex, and hex is always
+// single-byte ASCII, unlike message bodies elsewhere in this file that
+// need rune-aware handling.
+func shortenContactKey(c chat.ContactKey) string {
+	s := string(c)
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:8] + "…" + s[len(s)-4:]
+}
+
+// truncateRunes shortens s to at most n runes, appending an ellipsis if
+// it was cut. Rune-, not byte-, based so truncating a message preview
+// containing multi-byte UTF-8 (emoji, accented characters) can't slice
+// through the middle of one and produce invalid text.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func (m Model) renderProfile() string {
@@ -1003,6 +1336,7 @@ func (m Model) renderProfile() string {
 		b.WriteString("(no display name set - see :name below)\n")
 	}
 	fmt.Fprintf(&b, "Public key:\n%x\n\n", m.identity.SigningPublic)
+	fmt.Fprintf(&b, "synq-server: %s\n", m.serverStatusLabel())
 	fmt.Fprintf(&b, "Connection: %s\n", connectionLabel(m.connected))
 	fmt.Fprintf(&b, "GitHub: %s\n", m.githubStatusLabel())
 	fmt.Fprintf(&b, "Theme: %s\n\n", m.theme.Palette.Name)
@@ -1010,6 +1344,10 @@ func (m Model) renderProfile() string {
 	b.WriteString("  :name <your name>      set your local display name\n")
 	b.WriteString("  :name clear            clear your local display name\n")
 	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
+	b.WriteString("  :register <username>   register a username with synq-server (permanent)\n")
+	b.WriteString("  :login                 reconnect after :logout, without restarting\n")
+	b.WriteString("  :logout                revoke all sessions and disconnect\n")
+	b.WriteString("  :chat <username>       open or start a chat thread (local only for now)\n")
 	b.WriteString("  :github                link your GitHub account\n")
 	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
 	b.WriteString("  :theme <name>          set a theme directly\n")
@@ -1025,6 +1363,25 @@ func connectionLabel(connected bool) string {
 
 // githubStatusLabel covers all three states of the Device Flow: never
 // started, waiting on the user to approve in a browser, or linked.
+// serverStatusLabel summarizes synq-server account status - distinct
+// from Connection below, which is specifically about the live WS
+// connection. A registered-but-not-logged-in state is a real,
+// reachable state this can show (e.g. right after :logout, or if
+// cmd/synq/main.go's automatic login at startup failed because the
+// server was unreachable) - not just "configured" vs "not".
+func (m Model) serverStatusLabel() string {
+	if m.apiClient == nil {
+		return "not configured - set SYNQ_SERVER_URL to use it"
+	}
+	if m.username == "" {
+		return "not registered - run :register <username>"
+	}
+	if m.accessToken == "" {
+		return fmt.Sprintf("registered as %s, but not logged in - run :login", m.username)
+	}
+	return fmt.Sprintf("[✓ %s]", m.username)
+}
+
 func (m Model) githubStatusLabel() string {
 	if m.githubHandle != "" {
 		return fmt.Sprintf("[✓ @%s]", m.githubHandle)

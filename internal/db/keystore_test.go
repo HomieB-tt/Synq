@@ -49,7 +49,7 @@ func TestSaveThenLoadRoundTrip(t *testing.T) {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
 	params := crypto.Argon2Params{MemoryKiB: 8 * 1024, Iterations: 1, Parallelism: 1}
-	vault, err := crypto.SealIdentity(id, []byte("test passphrase"), params)
+	vault, err := crypto.SealIdentity(id, "", []byte("test passphrase"), params)
 	if err != nil {
 		t.Fatalf("SealIdentity: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestSaveThenLoadRoundTrip(t *testing.T) {
 	}
 
 	// And the round-tripped vault should still decrypt correctly end to end.
-	opened, err := crypto.OpenIdentity(loaded, []byte("test passphrase"))
+	opened, _, err := crypto.OpenIdentity(loaded, []byte("test passphrase"))
 	if err != nil {
 		t.Fatalf("OpenIdentity on loaded vault: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSaveOverwritesExistingVault(t *testing.T) {
 	params := crypto.Argon2Params{MemoryKiB: 8 * 1024, Iterations: 1, Parallelism: 1}
 
 	id1, _ := crypto.GenerateIdentity()
-	vault1, err := crypto.SealIdentity(id1, []byte("first passphrase"), params)
+	vault1, err := crypto.SealIdentity(id1, "", []byte("first passphrase"), params)
 	if err != nil {
 		t.Fatalf("SealIdentity (1): %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSaveOverwritesExistingVault(t *testing.T) {
 	}
 
 	id2, _ := crypto.GenerateIdentity()
-	vault2, err := crypto.SealIdentity(id2, []byte("second passphrase"), params)
+	vault2, err := crypto.SealIdentity(id2, "", []byte("second passphrase"), params)
 	if err != nil {
 		t.Fatalf("SealIdentity (2): %v", err)
 	}
@@ -121,7 +121,7 @@ func TestSaveOverwritesExistingVault(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	opened, err := crypto.OpenIdentity(loaded, []byte("second passphrase"))
+	opened, _, err := crypto.OpenIdentity(loaded, []byte("second passphrase"))
 	if err != nil {
 		t.Fatalf("expected second vault to be the one stored, got error: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSaveOverwritesExistingVault(t *testing.T) {
 		t.Error("loaded identity does not match the second (overwriting) identity")
 	}
 
-	if _, err := crypto.OpenIdentity(loaded, []byte("first passphrase")); err == nil {
+	if _, _, err := crypto.OpenIdentity(loaded, []byte("first passphrase")); err == nil {
 		t.Error("expected first passphrase to no longer work after overwrite, but it did")
 	}
 }
@@ -144,7 +144,7 @@ func TestOpenKeyStoreIsIdempotent(t *testing.T) {
 	}
 	id, _ := crypto.GenerateIdentity()
 	params := crypto.Argon2Params{MemoryKiB: 8 * 1024, Iterations: 1, Parallelism: 1}
-	vault, _ := crypto.SealIdentity(id, []byte("pw"), params)
+	vault, _ := crypto.SealIdentity(id, "", []byte("pw"), params)
 	if err := ks1.Save(vault); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

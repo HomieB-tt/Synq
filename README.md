@@ -15,7 +15,7 @@ Synq gives you four core views, all reachable without touching a mouse:
 
 ## Why terminal-native
 
-Synq is built for developers who live in a terminal. Every interaction — navigation, posting, messaging, command invocation — is keyboard-first, fast, and scriptable. It's meant to sit alongside `vim`, `tmux`, and `git`, not replace a browser tab.
+Synq is built for developers who live in the terminal/CLI. Every interaction ( navigation, posting, messaging, command invocation) is keyboard-first, fast, and scriptable. It's meant to sit alongside `vim`, `tmux`, and `git`, not replace a browser tab.
 
 ## Security model
 
@@ -27,7 +27,7 @@ Synq is built for developers who live in a terminal. Every interaction — navig
 ## Tech stack
 
 | Purpose | Library |
-|---|---|
+| --- | --- |
 | TUI / Elm-architecture state engine | `charm.land/bubbletea/v2` |
 | Styling & layout | `charm.land/lipgloss/v2` |
 | Form components & inputs | `charm.land/bubbles/v2` |
@@ -41,7 +41,7 @@ Requires Go 1.23+.
 ## Keyboard reference
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `1` `2` `3` `4` | Switch to Feed / Nodes / Chat / Profile |
 | `Tab` / `Shift+Tab` | Move focus between panes |
 | `:` or `Ctrl+P` | Open command palette |
@@ -51,31 +51,39 @@ Requires Go 1.23+.
 ## Command palette
 
 | Command | Does |
-|---|---|
+| --- | --- |
 | `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
-| `:name <your name>` | Set a local display name, shown in your own Profile tab. This is purely a local label - not the server-backed username system (see `DESIGN.md`), since `synq-server` doesn't exist yet to assign or verify one. |
+| `:name <your name>` | Set a local display name, shown in your own Profile tab. Purely a local, free-form, trivially-changeable label - not the same thing as the permanent `:register`ed username below (see `DESIGN.md`'s note on `PrefUsername`/`PrefDisplayName` for why those are never interchangeable). |
 | `:name clear` | Clear your local display name. |
-| `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
+| `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly - unlike `:chat`, this doesn't go through a username lookup yet. |
+| `:register <username>` | Register a username with `synq-server`, tied to this identity. **Permanent** - there's no rename endpoint. Only needed once; if you skipped the first-launch prompt, this is the same flow. Requires `SYNQ_SERVER_URL`. |
+| `:login` | Manually re-authenticate after `:logout`, without restarting Synq. You won't normally need this - a registered identity logs in automatically and silently on every launch (see Configuration below). |
+| `:logout` | Revoke all of this account's sessions and disconnect. |
+| `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Chat history is session-only (see `DESIGN.md` section 4) and, for now, local only - composing and sending a message appends it to your own view, but nothing is actually transmitted yet, since the WS wire message format `synq-server` expects for chat isn't wired up in `internal/ws` yet. Requires being logged in. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:quit` | Same as pressing `q`. |
 
 ## Configuration
 
-**`SYNQ_SERVER_URL`** - the WebSocket URL of a synq-server to connect to (e.g. `wss://example.invalid/ws`). Without this set, Synq never attempts a connection and the header's connection indicator stays "offline" permanently - there's no default to fall back to, since `synq-server` doesn't exist as a runnable project yet (see `synq-server-DESIGN.md`). Setting this only gets you a live transport connection: there's no wire message format defined yet (see `internal/ws`'s package doc comment), so Feed/Nodes/Chat still won't show real data even once connected.
+**`SYNQ_SERVER_URL`** - the base URL of a `synq-server` deployment (e.g. `https://synq-server-production.up.railway.app`), used for both REST calls and the WS connection - the WS endpoint is derived from this automatically (same host, `/ws` path, scheme swapped to `ws`/`wss`). Without this set, Synq never attempts any server connection: guest Feed browsing, `:register`, `:login`, `:chat`, and the live WS connection are all unavailable, and the header's connection indicator stays "offline" permanently. There's no default to fall back to.
+
+Logging in is automatic for a returning, already-registered identity: on every launch, right after your passphrase unlocks the vault, Synq silently tries to refresh your stored session, falling back to a full (but still silent - no prompt) re-login using your already-unlocked identity if that fails. You'll only ever see `:login` needed manually after an explicit `:logout`.
 
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 
 To set it up:
+
 1. On GitHub, go to **Settings → Developer settings → OAuth Apps → New OAuth App** (a plain OAuth App, not a GitHub App).
 2. Fill in a name and homepage URL (anything - GitHub requires a value here, but the Device Flow used by Synq never redirects to it).
 3. After creating the app, enable **"Enable Device Flow"** in its settings. This is off by default and the flow will fail without it.
 4. Copy the **Client ID** (not the client secret - Device Flow doesn't use one) and set it before running Synq:
+
    ```
    export SYNQ_GITHUB_CLIENT_ID=your_client_id_here
    ```
 
-Note that right now, a successful `:github` link is verified against GitHub directly and stored locally - it is not yet cross-checked by `synq-server` (which doesn't have an auth system yet), so the badge is currently self-asserted rather than independently confirmed by anyone else. See `synq-server-DESIGN.md` section 1 for the eventual full picture.
+Note that right now, a successful `:github` link is verified against GitHub directly and stored locally only - Synq doesn't yet call `synq-server`'s `/auth/github/verify` to record it server-side (see `API.md`), so the badge is currently self-asserted rather than independently confirmed by anyone else who might look you up. See `synq-server-DESIGN.md` section 1 for the eventual full picture.
 
 ## Project layout
 

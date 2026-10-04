@@ -29,16 +29,34 @@ const PrefGitHubHandle = "github_handle"
 // PrefDisplayName is the preferences key under which a locally-chosen
 // display name is stored (see internal/app's `:name` command).
 //
-// This is deliberately separate from, and not a substitute for, the
-// server-backed username system described in DESIGN.md ("Nothing in
-// the base design confirms that a public key returned for a username
-// actually belongs to that person"): that username is assigned by
-// synq-server at registration and is what other users actually see as
-// a post's author. This preference is a purely local, client-side
-// label - useful today as a stand-in while synq-server doesn't exist
-// yet, but not something the client sends anywhere or that any other
-// user will ever see.
+// This is deliberately separate from, and never a substitute for,
+// PrefUsername below. A display name is a free-form, trivially
+// changeable local label with no meaning to synq-server at all; a
+// username is the permanent, unique identifier synq-server actually
+// knows the user by - the two must never be conflated or derived from
+// one another. See PrefUsername's doc comment for the reasoning.
 const PrefDisplayName = "display_name"
+
+// PrefUsername is the preferences key under which the username this
+// identity has registered with synq-server is stored, once
+// registration (`:register <username>`, see internal/app) succeeds.
+// Empty/unset means this identity has never registered.
+//
+// Unlike PrefDisplayName, this is not cosmetic and not meant to be
+// casually changed: it's the primary key synq-server actually
+// identifies this account by - for login, for `/users/{username}/keys`
+// lookups other people use to find this identity, for everything
+// `API.md` keys off a username for. Nothing in that API supports
+// renaming a registered username once chosen, so the registration flow
+// that writes this value is expected to say so plainly before it does.
+//
+// This value itself is not secret - usernames are public by design -
+// so it lives here in plaintext like any other preference. What *is*
+// secret is the refresh token issued alongside it at registration or
+// login, which is sealed inside the encrypted identity vault instead
+// (see crypto.SealIdentity's doc comment for why) rather than stored
+// as a preference next to this.
+const PrefUsername = "username"
 
 // SavePreference stores a simple key/value setting, such as the
 // selected theme. Unlike identity_vault, preferences are not secret and

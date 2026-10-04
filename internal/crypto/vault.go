@@ -51,15 +51,25 @@ type EncryptedVault struct {
 	Ciphertext []byte
 }
 
-// SealIdentity encrypts an identity's secret key material under a key
-// derived from passphrase, using a freshly generated random salt and
-// nonce.
+// SealIdentity encrypts an identity's secret key material - and,
+// optionally, a synq-server refresh token - under a key derived from
+// passphrase, using a freshly generated random salt and nonce.
+//
+// refreshToken may be empty, for an identity that has never registered
+// a username with synq-server yet (see internal/app's registration
+// flow). It's sealed inside the same ciphertext as the identity keys,
+// not stored separately in plaintext (e.g. in db.KeyStore's
+// preferences table): unlike a theme choice, a refresh token is a real
+// bearer credential - anyone holding it can act as this identity
+// against the server for as long as it remains valid - so it gets the
+// same protection as the identity keys themselves, under the same
+// passphrase.
 //
 // There is no recovery path if the passphrase is lost — that is a
 // deliberate consequence of Synq's zero-knowledge design (DESIGN.md
 // section 1), not an oversight, and callers presenting this to a user
 // for the first time should say so explicitly.
-func SealIdentity(id *Identity, passphrase []byte, params Argon2Params) (*EncryptedVault, error) {
+func SealIdentity(id *Identity, refreshToken string, passphrase []byte, params Argon2Params) (*EncryptedVault, error) {
 	if len(passphrase) == 0 {
 		return nil, errors.New("crypto: passphrase must not be empty")
 	}
@@ -80,9 +90,14 @@ func SealIdentity(id *Identity, passphrase []byte, params Argon2Params) (*Encryp
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
 
-	plaintext := make([]byte, 0, plainSize)
+	// No length prefix needed for the trailing refresh token: secretbox
+	// decrypts back to the exact original plaintext in one piece, so
+	// OpenIdentity already knows the total length and can just slice
+	// off everything after the fixed-size key material - see there.
+	plaintext := make([]byte, 0, plainSize+len(refreshToken))
 	plaintext = append(plaintext, id.seed()...)
 	plaintext = append(plaintext, id.BoxPrivate[:]...)
+	plaintext = append(plaintext, refreshToken...)
 	defer zero(plaintext)
 
 	ciphertext := secretbox.Seal(nil, plaintext, &nonce, &keyArr)
@@ -95,19 +110,24 @@ func SealIdentity(id *Identity, passphrase []byte, params Argon2Params) (*Encryp
 	}, nil
 }
 
-// OpenIdentity decrypts a vault with the given passphrase and
-// reconstructs the identity.
+// OpenIdentity decrypts a vault with the given passphrase, reconstructs
+// the identity, and returns whatever refresh token was sealed
+// alongside it (see SealIdentity) - empty if none was, including for
+// every vault sealed before this field existed: those are exactly
+// plainSize bytes of plaintext with nothing trailing, which this
+// parses as "no refresh token" rather than a format error, so
+// existing identities keep opening normally after this change.
 //
 // Any failure — wrong passphrase, corrupted data, tampered ciphertext —
 // returns the same generic error. Callers must not try to distinguish
 // these cases for the user; doing so (e.g. "salt looked fine but
 // decryption failed" vs "malformed vault") can leak information useful
 // to an attacker probing the vault format.
-func OpenIdentity(vault *EncryptedVault, passphrase []byte) (*Identity, error) {
+func OpenIdentity(vault *EncryptedVault, passphrase []byte) (*Identity, string, error) {
 	const errMsg = "crypto: incorrect passphrase or corrupted vault"
 
 	if len(vault.Nonce) != nonceSize {
-		return nil, errors.New(errMsg)
+		return nil, "", errors.New(errMsg)
 	}
 
 	key := deriveKey(passphrase, vault.Salt, vault.Params)
@@ -121,21 +141,27 @@ func OpenIdentity(vault *EncryptedVault, passphrase []byte) (*Identity, error) {
 
 	plaintext, ok := secretbox.Open(nil, vault.Ciphertext, &nonce, &keyArr)
 	if !ok {
-		return nil, errors.New(errMsg)
+		return nil, "", errors.New(errMsg)
 	}
 	defer zero(plaintext)
 
-	if len(plaintext) != plainSize {
-		return nil, errors.New(errMsg)
+	if len(plaintext) < plainSize {
+		return nil, "", errors.New(errMsg)
 	}
 
 	edSeed := make([]byte, ed25519.SeedSize)
 	copy(edSeed, plaintext[:ed25519.SeedSize])
 
 	var boxPriv [32]byte
-	copy(boxPriv[:], plaintext[ed25519.SeedSize:])
+	copy(boxPriv[:], plaintext[ed25519.SeedSize:plainSize])
 
-	return identityFromSeeds(edSeed, &boxPriv)
+	refreshToken := string(plaintext[plainSize:])
+
+	id, err := identityFromSeeds(edSeed, &boxPriv)
+	if err != nil {
+		return nil, "", err
+	}
+	return id, refreshToken, nil
 }
 
 func deriveKey(passphrase, salt []byte, p Argon2Params) []byte {

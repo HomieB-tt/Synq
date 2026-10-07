@@ -23,6 +23,8 @@ Synq is built for developers who live in the terminal/CLI. Every interaction ( n
 - Secret keys are stored in the local SQLite key store and never transmitted.
 - Private messages are encrypted client-side, per recipient, before being sent over the WebSocket connection. The server only ever handles ciphertext.
 - There is no server-side plaintext, no server-side decryption capability, and no message persistence beyond the sender and recipient's own local caches.
+- **There is no passphrase recovery** (`DESIGN.md` section 1): the passphrase is the only thing that can open the vault, and it is never stored anywhere - forgotten passphrase means forgotten identity, by design.
+- **Starting over after a forgotten passphrase:** quit and run `synq --forget`. It *renames* the key store beside itself (e.g. `~/.config/synq/synq.db.bak-20261007-150405`) - it is never deleted - and the next launch opens the first-run menu as if the device were new. The archive still holds the old identity plus your local preferences (theme, key pins, GitHub handle); delete it yourself whenever you decide you no longer need it. Synq prints this hint after two failed passphrase attempts, so the escape hatch is discoverable from the prompt that would otherwise loop forever.
 
 ## Tech stack
 

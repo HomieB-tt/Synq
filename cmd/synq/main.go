@@ -5,9 +5,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,10 +30,85 @@ import (
 const sessionTimeout = 15 * time.Second
 
 func main() {
+	// --forget runs before the store is opened: it's the escape hatch
+	// for someone who has permanently lost their passphrase (DESIGN.md
+	// section 1 - there is no recovery), and it must work from exactly
+	// the state where every other path into Synq is blocked behind the
+	// unlock prompt.
+	if slices.Contains(os.Args[1:], "--forget") {
+		archive, err := forgetKeyStore()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "synq:", err)
+			os.Exit(1)
+		}
+		if archive != "" {
+			fmt.Printf("Archived the key store to:\n  %s\n", archive)
+			fmt.Println("It still holds the old identity (useless without the passphrase),")
+			fmt.Println("plus theme/key-pin preferences. Synq never deletes it - do that yourself.")
+		} else {
+			fmt.Println("No key store on this device yet - nothing to forget.")
+		}
+		fmt.Println()
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "synq:", err)
 		os.Exit(1)
 	}
+}
+
+// forgetKeyStore locates the key store and archives it in place - see
+// archiveKeyStore. Returns the archive path, or "" when there was
+// nothing to archive.
+func forgetKeyStore() (string, error) {
+	dbPath, err := keyStorePath()
+	if err != nil {
+		return "", fmt.Errorf("locate key store: %w", err)
+	}
+	return archiveKeyStore(dbPath, time.Now())
+}
+
+// archiveKeyStore moves the SQLite key store at dbPath aside to a
+// timestamped name next to it, so the next launch treats this device
+// as brand new (run() finds no identity and shows the landing menu).
+//
+// The archive lives beside the original - same directory, same
+// permissions - rather than in a trash folder or under /tmp: it is
+// the user's only remaining copy of an unrecoverable identity, and
+// the whole point of the rename (instead of delete) is that they can
+// decide later whether to keep it. Sidecar files SQLite may have left
+// behind (-wal/-shm/-journal) follow the database to matching
+// archive names, best-effort: they're only meaningful alongside the
+// database they belong to.
+func archiveKeyStore(dbPath string, now time.Time) (string, error) {
+	if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect key store: %w", err)
+	}
+
+	archive := fmt.Sprintf("%s.bak-%s", dbPath, now.Format("20060102-150405"))
+	for suffix := 1; ; suffix++ {
+		if _, err := os.Stat(archive); errors.Is(err, fs.ErrNotExist) {
+			break
+		} else if err != nil {
+			return "", fmt.Errorf("inspect archive target: %w", err)
+		}
+		// Two --forgets in the same second must not overwrite each
+		// other - the first archive is someone's identity copy.
+		archive = fmt.Sprintf("%s.bak-%s-%d", dbPath, now.Format("20060102-150405"), suffix)
+	}
+
+	if err := os.Rename(dbPath, archive); err != nil {
+		return "", fmt.Errorf("archive key store: %w", err)
+	}
+	for _, side := range []string{"-wal", "-shm", "-journal"} {
+		src := dbPath + side
+		if _, err := os.Stat(src); err == nil {
+			_ = os.Rename(src, archive+side)
+		}
+	}
+	return archive, nil
 }
 
 func run() error {
@@ -447,6 +525,10 @@ func unlockIdentity(ks *db.KeyStore) (id *crypto.Identity, refreshToken string, 
 		return nil, "", nil, fmt.Errorf("load identity: %w", err)
 	}
 
+	// Two failures is early enough that someone who genuinely forgot
+	// the passphrase learns the exit exists, and late enough that a
+	// simple typo doesn't get told about deleting their identity.
+	attempts := 0
 	for {
 		pw, err := promptPassphrase("Passphrase: ")
 		if err != nil {
@@ -459,7 +541,12 @@ func unlockIdentity(ks *db.KeyStore) (id *crypto.Identity, refreshToken string, 
 		}
 		zeroBytes(pw)
 
+		attempts++
 		fmt.Fprintln(os.Stderr, "Incorrect passphrase. Try again (Ctrl+C to quit).")
+		if attempts == 2 {
+			fmt.Fprintln(os.Stderr,
+				"Forgot it? Quit and re-run synq with --forget to archive this identity and start over.")
+		}
 	}
 }
 

@@ -56,28 +56,19 @@ Requires Go 1.23+.
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
 | `:name <your name>` | Set a local display name, shown in your own Profile tab. Purely a local, free-form, trivially-changeable label - not the same thing as the permanent `:register`ed username below (see `DESIGN.md`'s note on `PrefUsername`/`PrefDisplayName` for why those are never interchangeable). |
 | `:name clear` | Clear your local display name. |
-<<<<<<< HEAD
 | `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly - unlike `:chat`, this doesn't go through a username lookup yet. |
 | `:register <username>` | Register a username with `synq-server`, tied to this identity. **Permanent** - there's no rename endpoint. Only needed once; if you skipped the first-launch prompt, this is the same flow. Requires `SYNQ_SERVER_URL`. |
 | `:login` | Manually re-authenticate after `:logout`, without restarting Synq. You won't normally need this - a registered identity logs in automatically and silently on every launch (see Configuration below). |
 | `:logout` | Revoke all of this account's sessions and disconnect. |
 | `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Chat history is session-only (see `DESIGN.md` section 4) and, for now, local only - composing and sending a message appends it to your own view, but nothing is actually transmitted yet, since the WS wire message format `synq-server` expects for chat isn't wired up in `internal/ws` yet. Requires being logged in. |
-=======
-| `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly for now - there's no contact lookup yet, since that depends on `synq-server`, which doesn't exist. |
-| `:chat <hex-pubkey>` | Open an existing thread with a contact, or start a new one, by their hex-encoded X25519 (not signing) public key. Chat history is session-only (see `DESIGN.md` section 4) and, for now, local only - composing and sending a message appends it to your own view, but nothing is actually transmitted yet, since the WS wire message format `synq-server` expects isn't wired up in `internal/ws` yet. |
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:quit` | Same as pressing `q`. |
 
 ## Configuration
 
-<<<<<<< HEAD
 **`SYNQ_SERVER_URL`** - the base URL of a `synq-server` deployment (e.g. `https://synq-server-production.up.railway.app`), used for both REST calls and the WS connection - the WS endpoint is derived from this automatically (same host, `/ws` path, scheme swapped to `ws`/`wss`). Without this set, Synq never attempts any server connection: guest Feed browsing, `:register`, `:login`, `:chat`, and the live WS connection are all unavailable, and the header's connection indicator stays "offline" permanently. There's no default to fall back to.
 
 Logging in is automatic for a returning, already-registered identity: on every launch, right after your passphrase unlocks the vault, Synq silently tries to refresh your stored session, falling back to a full (but still silent - no prompt) re-login using your already-unlocked identity if that fails. You'll only ever see `:login` needed manually after an explicit `:logout`.
-=======
-**`SYNQ_SERVER_URL`** - the WebSocket URL of the synq-server to connect to (e.g. `wss://example.invalid/ws`). Without this set, Synq never attempts a connection and the header's connection indicator stays "offline" permanently - there's no default to fall back to, since `synq-server` doesn't exist as a runnable project yet (see `synq-server-DESIGN.md`). Setting this only gets you a live transport connection: there's no wire message format defined yet (see `internal/ws`'s package doc comment), so Feed/Nodes/Chat still won't show real data even once connected.
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 

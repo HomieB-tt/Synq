@@ -183,7 +183,6 @@ func TestIsNotFoundIsUnauthorizedIsRateLimited(t *testing.T) {
 }
 
 func TestGetPublicKeysEscapesUsernameInPath(t *testing.T) {
-<<<<<<< HEAD
 	var gotEscapedPath string
 
 	client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -195,12 +194,6 @@ func TestGetPublicKeysEscapesUsernameInPath(t *testing.T) {
 		// actually went out on the wire, which is the thing this test
 		// means to check.
 		gotEscapedPath = r.URL.EscapedPath()
-=======
-	var gotPath string
-
-	client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(PublicKeys{Username: "weird user"})
 	})
@@ -212,12 +205,7 @@ func TestGetPublicKeysEscapesUsernameInPath(t *testing.T) {
 	// url.PathEscape turns a space into %20, not "+" (that's query-string
 	// escaping) - confirms the right escaping function was used for a
 	// path segment specifically.
-<<<<<<< HEAD
 	if gotEscapedPath != "/users/weird%20user/keys" {
 		t.Errorf("escaped path = %q, want /users/weird%%20user/keys", gotEscapedPath)
-=======
-	if gotPath != "/users/weird%20user/keys" {
-		t.Errorf("path = %q, want /users/weird%%20user/keys", gotPath)
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 	}
 }

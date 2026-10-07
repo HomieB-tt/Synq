@@ -17,10 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-<<<<<<< HEAD
 	"github.com/HomieB-tt/synq/internal/api"
-=======
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
@@ -354,7 +351,6 @@ type Model struct {
 	chatActive chat.ContactKey
 	chatInput  string
 
-<<<<<<< HEAD
 	// chatUsernames remembers the username a contact was resolved
 	// through via `:chat <username>` (see handleChatResolveResult), so
 	// the thread list can display it instead of chat.ContactKey's raw
@@ -365,8 +361,6 @@ type Model struct {
 	// this starts empty every launch.
 	chatUsernames map[chat.ContactKey]string
 
-=======
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 	quitting bool
 }
 
@@ -405,13 +399,9 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
 		displayName:    displayName,
-<<<<<<< HEAD
 		apiClient:      session.API,
 		username:       session.Username,
 		accessToken:    session.AccessToken,
-=======
-		wsServerURL:    os.Getenv("SYNQ_SERVER_URL"),
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 		chatStore:      chat.NewStore(),
 	}
 }
@@ -882,7 +872,6 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
 		}
 		if len(fields) != 2 {
-<<<<<<< HEAD
 			return "Usage: :chat <username>", false, nil
 		}
 		if m.apiClient == nil {
@@ -928,22 +917,6 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "Not logged in.", false, nil
 		}
 		return "Logging out...", false, logoutCmd(m.apiClient, m.accessToken)
-=======
-			return "Usage: :chat <contact's hex-encoded X25519 public key>", false, nil
-		}
-		contactPub, err := decodeHexBoxPublicKey(fields[1])
-		if err != nil {
-			return fmt.Sprintf("Invalid public key: %v", err), false, nil
-		}
-		contact := chat.NewContactKey(contactPub)
-		isNew := !m.chatStore.HasThread(contact)
-		m.activeTab = tabChat
-		m.chatActive = contact
-		if isNew {
-			return fmt.Sprintf("Started a new thread with %s.", fields[1]), false, nil
-		}
-		return fmt.Sprintf("Opened your thread with %s.", fields[1]), false, nil
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 
 	case "github":
 		if m.identity == nil {
@@ -1270,11 +1243,7 @@ func (m Model) renderChat() string {
 		threads := m.chatStore.Threads()
 		if len(threads) == 0 {
 			return "No open chats. Chat history is session-only - see DESIGN.md section 4.\n\n" +
-<<<<<<< HEAD
 				"Start one with :chat <username>."
-=======
-				"Start one with :chat <contact's hex-encoded X25519 public key>."
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 		}
 
 		var b strings.Builder
@@ -1282,26 +1251,16 @@ func (m Model) renderChat() string {
 		for _, contact := range threads {
 			msgs := m.chatStore.Messages(contact)
 			last := msgs[len(msgs)-1]
-<<<<<<< HEAD
 			fmt.Fprintf(&b, "  %s  (%d) %s\n", m.chatContactLabel(contact), len(msgs), truncateRunes(string(last.Body), 40))
 		}
 		b.WriteString("\nOpen one with :chat <username>.")
-=======
-			fmt.Fprintf(&b, "  %s  (%d) %s\n", shortenContactKey(contact), len(msgs), truncateRunes(string(last.Body), 40))
-		}
-		b.WriteString("\nOpen one with :chat <hex-pubkey>.")
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 		return b.String()
 	}
 
 	msgs := m.chatStore.Messages(m.chatActive)
 
 	var b strings.Builder
-<<<<<<< HEAD
 	fmt.Fprintf(&b, "Chat with %s\n", m.chatContactLabel(m.chatActive))
-=======
-	fmt.Fprintf(&b, "Chat with %s\n", shortenContactKey(m.chatActive))
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 	b.WriteString(m.theme.Muted.Render("Not yet connected to synq-server chat - messages stay local only for now.") + "\n\n")
 
 	if len(msgs) == 0 {
@@ -1320,7 +1279,6 @@ func (m Model) renderChat() string {
 	return b.String()
 }
 
-<<<<<<< HEAD
 // chatContactLabel displays contact by whatever username it was last
 // resolved through (see handleChatResolveResult), falling back to its
 // shortened raw key if none is on file - e.g. for a thread that
@@ -1335,8 +1293,6 @@ func (m Model) chatContactLabel(contact chat.ContactKey) string {
 	return shortenContactKey(contact)
 }
 
-=======
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 // shortenContactKey abbreviates a full hex-encoded public key for
 // display (e.g. in the thread list) - plain byte-slicing is safe here
 // specifically because a ContactKey is always hex, and hex is always
@@ -1388,14 +1344,10 @@ func (m Model) renderProfile() string {
 	b.WriteString("  :name <your name>      set your local display name\n")
 	b.WriteString("  :name clear            clear your local display name\n")
 	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
-<<<<<<< HEAD
 	b.WriteString("  :register <username>   register a username with synq-server (permanent)\n")
 	b.WriteString("  :login                 reconnect after :logout, without restarting\n")
 	b.WriteString("  :logout                revoke all sessions and disconnect\n")
 	b.WriteString("  :chat <username>       open or start a chat thread (local only for now)\n")
-=======
-	b.WriteString("  :chat <hex-pubkey>     open or start a chat thread (local only for now)\n")
->>>>>>> c07a8826cebd3adc3c6c98a636292b74dc011e31
 	b.WriteString("  :github                link your GitHub account\n")
 	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
 	b.WriteString("  :theme <name>          set a theme directly\n")

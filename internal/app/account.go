@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,11 +15,22 @@ import (
 )
 
 // apiHTTPTimeout bounds every individual synq-server REST call Model
-// makes - registration, login, logout, and a :chat username lookup.
-// Matches api.NewClient's own http.Client timeout; this is just the
-// per-tea.Cmd equivalent of it for calls that chain two requests
-// (challenge then verify).
+// makes - registration, login, logout, a :chat username lookup, and a
+// mid-session re-auth. Matches api.NewClient's own http.Client timeout;
+// this is just the per-tea.Cmd equivalent of it for calls that chain two
+// requests (challenge then verify).
 const apiHTTPTimeout = 15 * time.Second
+
+// reauthCooldownPeriod is how long Model waits after a *failed*
+// automatic re-auth before it will try another one. This is deliberately
+// not a general backoff: it only covers the background path
+// (maybeReauthCmd), where a user isn't waiting on anything and the
+// obvious failure mode - a revoked refresh token on a connection
+// already hammering reconnects - would otherwise turn into an
+// unattended stream of 401s against synq-server's rate-limited auth
+// endpoints until the account gets throttled. A deliberate `:login`
+// bypasses it entirely, and a successful re-auth clears it.
+const reauthCooldownPeriod = time.Minute
 
 // --- :register ---
 
@@ -55,17 +67,19 @@ func registerUsernameCmd(apiClient *api.Client, id *crypto.Identity, username st
 // see db.PrefUsername's doc comment on why that's fine for a username
 // specifically) and holds the access token in memory.
 //
-// What it deliberately does not do: persist the refresh token
-// RegisterVerify also returned. Doing that means re-sealing the
-// identity vault, which needs the passphrase - and Model never holds
-// it (see Session's doc comment). The practical consequence: after a
-// :register run from inside the TUI, this session works normally, but
-// the *next* launch's automatic login (cmd/synq/main.go's
-// establishSession) finds no refresh token in the vault yet, so it
-// does one full login instead of a cheap refresh - which succeeds
-// (this identity really is registered now) and persists the vault
-// properly at that point, since main.go does hold the passphrase.
-// Self-healing, just not optimal on that one specific next reconnect.
+// What it deliberately does not do: *persist* the refresh token
+// RegisterVerify also returned. It is kept for the rest of this run
+// (see Model.refreshToken, so the session survives its own expiry),
+// but writing it out means re-sealing the identity vault, which needs
+// the passphrase - and Model never holds it (see Session's doc
+// comment). The practical consequence: after a :register run from
+// inside the TUI, this session works normally, but the *next* launch's
+// automatic login (cmd/synq/main.go's establishSession) finds no
+// refresh token in the vault yet, so it does one full login instead of
+// a cheap refresh - which succeeds (this identity really is registered
+// now) and persists the vault properly at that point, since main.go
+// does hold the passphrase. Self-healing, just not optimal on that one
+// specific next reconnect.
 func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.commandMsg = fmt.Sprintf("Registration failed: %v", msg.err)
@@ -74,6 +88,7 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 
 	m.username = msg.username
 	m.accessToken = msg.tokens.AccessToken
+	m.refreshToken = msg.tokens.RefreshToken
 
 	if err := m.store.SavePreference(db.PrefUsername, msg.username); err != nil {
 		m.commandMsg = fmt.Sprintf("Registered as %s, but failed to save that locally: %v", msg.username, err)
@@ -119,12 +134,19 @@ func loginCmd(apiClient *api.Client, id *crypto.Identity, username string) tea.C
 	}
 }
 
-// handleLoginResult holds the new access token in memory only - like
-// handleRegisterResult, it cannot persist the refresh token LoginVerify
-// also returned, for the same reason (no passphrase in Model). A
-// manual :login's session is real but vault-ephemeral: it works for
-// the rest of this run, and self-heals into a properly persisted one
-// on the next launch via main.go's own login fallback.
+// handleLoginResult holds the new tokens in memory only - like
+// handleRegisterResult, it cannot *persist* the refresh token
+// LoginVerify also returned, for the same reason (no passphrase in
+// Model), but it does keep it for the rest of this run so an automatic
+// re-auth can use it. A manual :login's session is real but
+// vault-ephemeral: it works for the rest of this run, and self-heals
+// into a properly persisted one on the next launch via main.go's own
+// login fallback.
+//
+// A successful login also cancels any failed-automatic-re-auth
+// bookkeeping: whatever made that attempt fail, this session supersedes
+// it, and there's no reason to leave the connection waiting out a
+// cooldown it no longer applies to.
 func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.commandMsg = fmt.Sprintf("Login failed: %v", msg.err)
@@ -132,6 +154,9 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.accessToken = msg.tokens.AccessToken
+	m.refreshToken = msg.tokens.RefreshToken
+	m.reauthRetryAfter = time.Time{}
+	m.reauthInFlight = false
 	m.commandMsg = fmt.Sprintf("Logged in as %s.", m.username)
 	return m, startWSCmd(m.apiClient.BaseURL, m.accessToken)
 }
@@ -143,11 +168,13 @@ type logoutResultMsg struct {
 }
 
 // logoutCmd revokes every session for this account at once
-// (LogoutAll), not just the current one - Model never holds a refresh
-// token to revoke individually (see package doc comments throughout
-// this file on why), so "all" is the only revocation this client is
-// able to ask for, which is also arguably the more intuitive meaning
-// for a user-facing :logout anyway.
+// (LogoutAll), not just the current one. Model now does hold a refresh
+// token, so the single-session /auth/logout would be reachable too -
+// this is a semantic choice rather than a limitation: "sign out"
+// meaning "sign me out everywhere" is the intuitive reading of a
+// user-facing :logout, and LogoutAll works off the access token alone,
+// which keeps it functional even if the refresh token is already dead
+// (in which case revoking it would have been a no-op anyway).
 func logoutCmd(apiClient *api.Client, accessToken string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
@@ -165,6 +192,14 @@ func logoutCmd(apiClient *api.Client, accessToken string) tea.Cmd {
 // LogoutAll actually reached the server this time.
 func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	m.accessToken = ""
+	// The refresh token and any pending re-auth state go with it: the
+	// server just revoked every session for this account (LogoutAll),
+	// so a leftover refresh token is dead, and a leftover cooldown
+	// would only delay the next :login's clean slate. With no WS client
+	// left, nothing can fire a re-auth anyway.
+	m.refreshToken = ""
+	m.reauthInFlight = false
+	m.reauthRetryAfter = time.Time{}
 	if m.wsClient != nil {
 		m.wsClient.Close()
 		m.wsClient = nil
@@ -175,6 +210,129 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.commandMsg = "Logged out."
+	return m, nil
+}
+
+// --- automatic re-auth (mid-session token expiry) ---
+
+type reauthResultMsg struct {
+	tokens *api.TokenPair
+	err    error
+}
+
+// refreshSessionCmd obtains a fresh access token for a session whose
+// WebSocket dial was just rejected with 401 (ws.StatusAuthExpired).
+// Two paths, tried in order:
+//
+//  1. POST /auth/refresh with the in-memory refresh token. That
+//     endpoint is deliberately not rate-limited server-side, it's a
+//     single round trip, and the response doesn't rotate the refresh
+//     token (see api.Refresh), so the one already held stays good.
+//  2. Only when the server explicitly rejected *that* token (401 -
+//     revoked, expired, unknown), a full challenge/verify login with
+//     this identity's signing key: the same exchange loginCmd runs,
+//     used here because a session with nothing left to refresh still
+//     deserves to reconnect rather than demand a manual :login.
+//
+// Every other refresh error - offline, DNS, server restarting - is
+// returned as-is instead of falling through to login: a login would
+// fail the same way, and spending a challenge/verify round trip
+// (IP-rate-limited to roughly one attempt per 30s) on a server we
+// already can't reach only moves this client closer to that limit for
+// nothing. The result lands in handleReauthResult either way, which is
+// where the cooldown on retrying begins.
+func refreshSessionCmd(apiClient *api.Client, refreshToken string, id *crypto.Identity, username string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
+		defer cancel()
+
+		if refreshToken != "" {
+			accessToken, err := apiClient.Refresh(ctx, refreshToken)
+			if err == nil {
+				return reauthResultMsg{tokens: &api.TokenPair{
+					AccessToken:  accessToken,
+					RefreshToken: refreshToken,
+				}}
+			}
+			if !api.IsUnauthorized(err) {
+				return reauthResultMsg{err: fmt.Errorf("refresh session: %w", err)}
+			}
+		}
+
+		if id == nil || username == "" {
+			return reauthResultMsg{err: errors.New("no usable refresh token, and no registered identity to log back in with")}
+		}
+
+		challenge, err := apiClient.LoginChallenge(ctx, username)
+		if err != nil {
+			return reauthResultMsg{err: fmt.Errorf("request login challenge: %w", err)}
+		}
+		sig := id.SignChallenge(challenge)
+		tokens, err := apiClient.LoginVerify(ctx, username, sig)
+		if err != nil {
+			return reauthResultMsg{err: fmt.Errorf("verify login: %w", err)}
+		}
+		return reauthResultMsg{tokens: tokens}
+	}
+}
+
+// maybeReauthCmd starts a re-auth unless one is already in flight or a
+// failed one is still within its cooldown, recording the in-flight
+// mark when it does start one. Returning nil is a decline, not a dead
+// end: the caller (Update's ws.StatusAuthExpired branch) keeps the
+// status pump armed either way, so the next AuthExpired out of Run's
+// backoff loop is a fresh chance once a guard clears.
+func (m *Model) maybeReauthCmd() tea.Cmd {
+	if m.reauthInFlight || time.Now().Before(m.reauthRetryAfter) || m.apiClient == nil {
+		return nil
+	}
+	m.reauthInFlight = true
+	return refreshSessionCmd(m.apiClient, m.refreshToken, m.identity, m.username)
+}
+
+// handleReauthResult installs a freshly obtained session, or starts
+// the cooldown if there isn't one.
+//
+// On success this says nothing: reconnecting quietly after a token
+// expired is the same experience as the silent auto-login at startup,
+// and the reconnect itself will show up as a normal status change. The
+// one remaining job is making the *next* dial use the new token - Run
+// is already sitting in its backoff loop, so swapping the URL is
+// enough to pick it up on the next attempt.
+func (m Model) handleReauthResult(msg reauthResultMsg) (tea.Model, tea.Cmd) {
+	if !m.reauthInFlight {
+		// The re-auth this belonged to was overtaken: a :logout, or a
+		// manual :login that produced fresher tokens, cleared the flag
+		// while the request was still out. Dropping it here means a
+		// session the user just signed out of doesn't come back to
+		// life, and newer tokens don't get replaced by older ones.
+		return m, nil
+	}
+	m.reauthInFlight = false
+
+	if msg.err != nil {
+		// Hold off until the cooldown passes. If this failed because
+		// the server said no, retrying immediately just converts one
+		// dead session into a stream of 401s against a rate-limited
+		// endpoint; and if it failed because the server is down, the
+		// reconnect loop will report AuthExpired again anyway, which
+		// is when this gets another chance. :login is unaffected.
+		m.reauthRetryAfter = time.Now().Add(reauthCooldownPeriod)
+		m.commandMsg = fmt.Sprintf("Session expired and couldn't be renewed: %v - run :login to reconnect.", msg.err)
+		return m, nil
+	}
+
+	m.accessToken = msg.tokens.AccessToken
+	m.refreshToken = msg.tokens.RefreshToken
+
+	if m.wsClient != nil && m.apiClient != nil {
+		wsURL, err := deriveWSURL(m.apiClient.BaseURL, m.accessToken)
+		if err != nil {
+			m.commandMsg = fmt.Sprintf("Session renewed, but the WebSocket URL is invalid: %v", err)
+			return m, nil
+		}
+		m.wsClient.SetURL(wsURL)
+	}
 	return m, nil
 }
 
@@ -199,8 +357,10 @@ func resolveChatContactCmd(apiClient *api.Client, accessToken, username string) 
 
 // handleChatResolveResult opens (or starts) the resolved contact's
 // thread, the same way the old direct hex-pubkey :chat path did, and
-// remembers the username → contact mapping (see Model.chatUsernames)
-// so the thread list can display it instead of a raw key.
+// records what the lookup learned - username for display, user id for
+// addressing (see Model.rememberContact) - so the thread list can show
+// a name instead of a raw key and later sends and inbound frames have
+// an id to speak in.
 func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		if api.IsNotFound(msg.err) {
@@ -225,11 +385,19 @@ func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea
 		return m, nil
 	}
 
-	contact := chat.NewContactKey(contactPub)
-	if m.chatUsernames == nil {
-		m.chatUsernames = make(map[chat.ContactKey]string)
+	if msg.keys.UserID == "" {
+		// Both wire directions speak in this id - EncodeSend's
+		// recipient and an inbound frame's sender - so a lookup that
+		// didn't return one leaves a thread nobody could ever send to
+		// or receive from. A server old enough to omit it (API.md's
+		// user_id) can't be talked to by this client at all; better to
+		// say so now than open a thread that silently goes nowhere.
+		m.commandMsg = fmt.Sprintf("synq-server returned no user id for %s - this client can't message them.", msg.username)
+		return m, nil
 	}
-	m.chatUsernames[contact] = msg.username
+
+	contact := chat.NewContactKey(contactPub)
+	m.rememberContact(contact, msg.username, msg.keys.UserID)
 
 	isNew := !m.chatStore.HasThread(contact)
 	m.activeTab = tabChat

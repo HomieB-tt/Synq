@@ -254,7 +254,12 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 	}
 
 	fmt.Println("Registered as", username)
-	return app.Session{API: apiClient, Username: username, AccessToken: tokens.AccessToken}
+	return app.Session{
+		API:          apiClient,
+		Username:     username,
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+	}
 }
 
 // promptUsername asks for the username to register. Only the most
@@ -367,7 +372,12 @@ func establishSession(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identit
 
 	if refreshToken != "" {
 		if accessToken, err := apiClient.Refresh(ctx, refreshToken); err == nil {
-			return app.Session{API: apiClient, Username: username, AccessToken: accessToken}
+			return app.Session{
+				API:          apiClient,
+				Username:     username,
+				AccessToken:  accessToken,
+				RefreshToken: refreshToken,
+			}
 		}
 		// Falls through to a full login attempt below instead of
 		// giving up - the identity's signing key can always
@@ -395,7 +405,12 @@ func establishSession(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identit
 	if err := persistSession(ks, id, passphrase, username, tokens.RefreshToken); err != nil {
 		fmt.Fprintln(os.Stderr, "synq: logged in, but failed to save the new session locally:", err)
 	}
-	return app.Session{API: apiClient, Username: username, AccessToken: tokens.AccessToken}
+	return app.Session{
+		API:          apiClient,
+		Username:     username,
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+	}
 }
 
 // unlockIdentity prompts for the existing passphrase and retries on a

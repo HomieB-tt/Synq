@@ -165,13 +165,16 @@ func fetchGitHubUserCmd(token string) tea.Cmd {
 
 // --- synq-server WebSocket connection (see internal/ws) ---
 //
-// wsClientReadyMsg/wsStatusMsg/wsConnectErrorMsg and the two Cmds
-// below follow the same "async event as a tea.Msg" shape as the
-// GitHub device-flow messages just above, with one addition:
-// waitForWSStatusCmd re-arms itself (returned again from within
-// Update's wsStatusMsg case) rather than firing once, since a
-// WebSocket connection's status can change at any time for the rest
-// of the program's life, unlike a one-shot HTTP poll.
+// wsClientReadyMsg/wsStatusMsg/wsFrameMsg/wsConnectErrorMsg and the
+// three Cmds below follow the same "async event as a tea.Msg" shape as
+// the GitHub device-flow messages just above, with one addition:
+// waitForWSStatusCmd and waitForWSFrameCmd re-arm themselves (returned
+// again from within Update's matching cases) rather than firing once,
+// since a connection's status and its inbound frame stream both go on
+// for the rest of the program's life, unlike a one-shot HTTP poll.
+// They're separate Cmds, not one loop over both channels: each blocks
+// until its own channel has something, and Bubble Tea runs each Cmd in
+// its own goroutine.
 
 type wsClientReadyMsg struct {
 	client *ws.Client
@@ -179,7 +182,31 @@ type wsClientReadyMsg struct {
 
 type wsStatusMsg ws.Status
 
+// wsFrameMsg is one inbound frame, already decoded by ws.DecodeFrame.
+// err is non-nil only for a frame that violated the wire contract
+// (malformed JSON, a message payload that isn't base64) - a frame
+// with a type this client doesn't know parses fine and arrives with
+// err nil, so an unexpected event type never reads as a broken
+// connection. See ws.DecodeFrame for why that distinction exists.
+type wsFrameMsg struct {
+	event ws.Event
+	err   error
+}
+
 type wsConnectErrorMsg string
+
+// wsSendErrorMsg reports a frame Client.Send refused to queue - in
+// practice, the connection was closed between Update deciding to send
+// and the command running. Surfacing it matters more than it would for
+// a failed handshake frame: a failed *message* send already has its
+// local echo in the thread, so staying quiet would read as delivered.
+// body (nil for handshake frames) comes back so Update can put the
+// message where it will still go out later.
+type wsSendErrorMsg struct {
+	contact chat.ContactKey
+	body    []byte
+	err     error
+}
 
 // deriveWSURL builds synq-server's WebSocket URL from its REST base
 // URL (SYNQ_SERVER_URL / apiClient.BaseURL): same host, /ws path,
@@ -217,8 +244,9 @@ func deriveWSURL(baseURL, accessToken string) (string, error) {
 // the program - Run only returns once Close is called, which happens
 // on quit (see the "q"/"ctrl+c" and ":quit" handling in
 // updateNormalMode and updateCommandMode). The returned message hands
-// the client back to Update so it can be stored and its Status()
-// channel listened to via waitForWSStatusCmd.
+// the client back to Update so it can be stored and its Status() and
+// Incoming() channels listened to via waitForWSStatusCmd and
+// waitForWSFrameCmd.
 func startWSCmd(baseURL, accessToken string) tea.Cmd {
 	return func() tea.Msg {
 		wsURL, err := deriveWSURL(baseURL, accessToken)
@@ -246,6 +274,33 @@ func waitForWSStatusCmd(client *ws.Client) tea.Cmd {
 			return nil
 		}
 		return wsStatusMsg(status)
+	}
+}
+
+// waitForWSFrameCmd blocks for exactly one raw frame on client's
+// Incoming() channel, decodes it (ws.DecodeFrame), and returns it as
+// a tea.Msg - the inbound half of the connection, where waitForWSStatusCmd
+// is the lifecycle half. Re-arms itself the same way, from Update's
+// wsFrameMsg case.
+//
+// The Done() case is what keeps this from leaking: Close never closes
+// Incoming (unlike a channel a producer closes when it's finished),
+// so once :logout or quit has closed the client this receive would
+// otherwise block forever on a channel nothing will ever write to
+// again. Returning nil stops the re-arm chain, exactly like
+// wsStatusMsg's StatusClosed handling does.
+func waitForWSFrameCmd(client *ws.Client) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case data, ok := <-client.Incoming():
+			if !ok {
+				return nil
+			}
+			event, err := ws.DecodeFrame(data)
+			return wsFrameMsg{event: event, err: err}
+		case <-client.Done():
+			return nil
+		}
 	}
 }
 
@@ -320,6 +375,23 @@ type Model struct {
 	username    string
 	accessToken string
 
+	// refreshToken renews accessToken when it runs out mid-session.
+	// synq-server validates the token only once, at the WebSocket
+	// handshake, so an expired one only breaks on the *next* reconnect
+	// attempt - which is exactly what reports a ws.StatusAuthExpired,
+	// answered by maybeReauthCmd. Memory only, like accessToken, and
+	// never written anywhere (see Session.RefreshToken for why Model
+	// can't simply read it out of the vault itself).
+	//
+	// reauthInFlight/reauthRetryAfter keep that from becoming a burst
+	// of parallel refresh-or-login calls against synq-server's
+	// rate-limited auth endpoints while the connection is failing
+	// repeatedly: one re-auth at a time, and after a failed one, none
+	// again until reauthRetryAfter has passed.
+	refreshToken     string
+	reauthInFlight   bool
+	reauthRetryAfter time.Time
+
 	// GitHub verification (synq-DESIGN.md section 9). Optional, and
 	// entirely separate from Synq's own identity/auth.
 	githubClientID        string // from SYNQ_GITHUB_CLIENT_ID; empty means "not configured"
@@ -340,28 +412,56 @@ type Model struct {
 	// persisted to db.KeyStore. chatActive is empty when the Chat tab
 	// should show the thread list rather than an open conversation.
 	//
-	// There is no wire protocol wired up yet for actually sending or
-	// receiving a chat message (see internal/ws's package doc comment)
-	// - opening a thread with `:chat <hex-pubkey>` and composing into
-	// it is real, tested, local UI and storage, but sending currently
-	// only appends to chatStore as a local echo. See the TODO in
-	// updateChatCompose's "enter" case for exactly where that changes
-	// once synq-server's message envelope is known.
+	// Messages go out sealed under a per-contact session key derived
+	// by the handshake in messaging.go, addressed with chatContacts'
+	// user id, through ws.EncodeSend; inbound frames come back the
+	// same way and are opened before they're appended (see
+	// handleWSFrame). Composing while no key exists yet parks the body
+	// until the handshake completes - see chatSessions below.
 	chatStore  *chat.Store
 	chatActive chat.ContactKey
 	chatInput  string
 
-	// chatUsernames remembers the username a contact was resolved
-	// through via `:chat <username>` (see handleChatResolveResult), so
-	// the thread list can display it instead of chat.ContactKey's raw
-	// hex public key. Purely a display convenience - chat.Store itself
-	// is keyed by ContactKey regardless, since that's what the
-	// handshake and encryption actually need; a username is never a
-	// substitute for the key itself. Not persisted - like chatStore,
-	// this starts empty every launch.
-	chatUsernames map[chat.ContactKey]string
+	// chatContacts remembers what `:chat <username>`'s server-side
+	// lookup learned about a contact (see handleChatResolveResult and
+	// rememberContact): the username it was resolved through, and the
+	// user id synq-server addresses messages with. Both matter, and
+	// neither is a substitute for the other - a thread is still keyed
+	// by chat.ContactKey (what the handshake and encryption need), the
+	// thread list still displays it by username, while every frame on
+	// the wire speaks only in user ids: ws.EncodeSend addresses the
+	// recipient's, and an inbound frame's Event.From is the sender's.
+	// Session-scoped like chatStore - nothing here is persisted, and a
+	// thread without a lookup behind it simply has no entry (see
+	// chatContactLabel's fallback).
+	chatContacts map[chat.ContactKey]contactInfo
+
+	// chatContactIDs is chatContacts' user id → contact index, the
+	// half an inbound frame needs: From arrives as a bare id with no
+	// username or key attached, so this is the only way to learn which
+	// thread (if any) it belongs to. See Model.contactForUserID.
+	chatContactIDs map[string]chat.ContactKey
+
+	// chatSessions holds each contact's handshake state for this
+	// launch - the other half of the wire protocol chatContacts
+	// addresses: their ephemeral key, the session key derived from it,
+	// and whatever was composed before that key existed. Session-
+	// scoped like everything else here, and reset with it: the
+	// ephemeral key this derives from dies with the process (§3), so
+	// persisting a session key would preserve exactly the state DESIGN
+	// says must not outlive the launch. See messaging.go.
+	chatSessions map[chat.ContactKey]*chatSession
 
 	quitting bool
+}
+
+// contactInfo is one contact's non-key metadata: a display username
+// and the server-side user id both wire directions speak in. Kept
+// together so the two can't drift apart the way two parallel maps
+// could - they are only ever written together, by rememberContact.
+type contactInfo struct {
+	Username string
+	UserID   string
 }
 
 // New builds the initial root model for a given, already-unlocked
@@ -402,6 +502,7 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 		apiClient:      session.API,
 		username:       session.Username,
 		accessToken:    session.AccessToken,
+		refreshToken:   session.RefreshToken,
 		chatStore:      chat.NewStore(),
 	}
 }
@@ -461,6 +562,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logoutResultMsg:
 		return m.handleLogoutResult(msg)
 
+	case reauthResultMsg:
+		return m.handleReauthResult(msg)
+
 	case chatResolveResultMsg:
 		return m.handleChatResolveResult(msg)
 
@@ -473,12 +577,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandMsg = string(msg)
 		return m, nil
 
+	case wsSendErrorMsg:
+		if msg.body != nil {
+			// The body never left this process: park it so the next
+			// send or handshake flush transmits it, instead of
+			// letting the local echo stand in for delivery.
+			session := m.sessionFor(msg.contact)
+			session.pending = append(session.pending, msg.body)
+		}
+		m.commandMsg = fmt.Sprintf("That didn't reach synq-server: %v", msg.err)
+		return m, nil
+
 	case wsClientReadyMsg:
 		m.wsClient = msg.client
-		return m, waitForWSStatusCmd(msg.client)
+		// Status and inbound frames are two independent streams off
+		// the same connection, so they get two independent re-arming
+		// Cmds rather than one loop trying to read both - a frame
+		// arriving must not delay a status event, or vice versa.
+		return m, tea.Batch(waitForWSStatusCmd(msg.client), waitForWSFrameCmd(msg.client))
 
 	case wsStatusMsg:
+		if m.wsClient == nil {
+			// handleLogoutResult tore the client down (Close, then
+			// nil) while this event was already in flight. Nothing to
+			// listen on any more, and re-arming would deref the nil
+			// client - but the connection is definitionally gone, so
+			// this is also the moment to stop claiming otherwise.
+			m.connected = false
+			return m, nil
+		}
 		status := ws.Status(msg)
+		if status == ws.StatusAuthExpired {
+			// The dial was rejected because the access token carried
+			// in the URL expired (synq-server checks it once, at the
+			// handshake - API.md). Only a new token helps, so ask for
+			// one - but keep the status pump running alongside it: if
+			// this re-auth fails, the *next* AuthExpired out of Run's
+			// backoff loop is the retry.
+			m.connected = false
+			reauth := m.maybeReauthCmd()
+			return m, tea.Batch(waitForWSStatusCmd(m.wsClient), reauth)
+		}
 		m.connected = status == ws.StatusConnected
 		if status == ws.StatusClosed {
 			// The client has fully shut down (see Client.Run's doc
@@ -489,6 +628,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, waitForWSStatusCmd(m.wsClient)
+
+	case wsFrameMsg:
+		return m.handleWSFrame(msg)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -518,6 +660,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// handleWSFrame processes one decoded inbound WebSocket frame (see
+// wsFrameMsg and ws.DecodeFrame).
+//
+// Re-arming below is unconditional for as long as the client exists,
+// including for frames this handler does nothing with. Dropping one
+// frame and stopping the pump are very different failures: the first
+// loses a single message, the second silently mutes the connection
+// from then on, with nothing left in the UI to show why.
+func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
+	if m.wsClient == nil {
+		// handleLogoutResult tore the client down while this frame was
+		// already in flight - same race as wsStatusMsg's nil guard, and
+		// re-arming here would deref the nil client.
+		return m, nil
+	}
+
+	switch {
+	case msg.err != nil:
+		m.commandMsg = fmt.Sprintf("Bad frame from synq-server: %v", msg.err)
+
+	case msg.event.IsRateLimited():
+		// The server's one self-delivered error (API.md): a send
+		// exceeded this user's rate bucket. Reported as a "try again
+		// shortly" notice rather than a failed send, because there is
+		// no send-failure path to report against yet - see the TODO in
+		// updateChatCompose.
+		m.commandMsg = "synq-server rate-limited that - wait a moment and try again."
+
+	case msg.event.Type == ws.EventTypeMessage:
+		contact, ok := m.contactForUserID(msg.event.From)
+		if !ok {
+			// No `:chat` lookup on file for this sender, so there is
+			// neither a static key to derive with nor a thread to put
+			// anything in. Drop it silently: any synq-server user can
+			// send frames to any other, and announcing each unknown
+			// sender would hand them a spam vector for the command
+			// bar. Once the contact is resolved, their next frame
+			// (handshakes are resent on every send attempt) lands.
+			return m, waitForWSFrameCmd(m.wsClient)
+		}
+		// Handshake or sealed message - messaging.go decides which,
+		// derives/opens accordingly, and answers when answering is
+		// needed. The reply is built before m is copied into the
+		// return value (handleIncomingPayload mutates it - the
+		// command message, session state, the thread itself), and the
+		// frame pump re-arms alongside that work rather than after it,
+		// so a slow reply can't delay the next frame.
+		handle := m.handleIncomingPayload(contact, msg.event.Payload)
+		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), handle)
+
+	case msg.event.Type == ws.EventTypeNodeRequest:
+		// TODO(nodes): this belongs in the Nodes tab, which fetches
+		// nothing at all yet (see renderContent's tabNodes case).
+		// All the server sends is the requester's user id - no
+		// username, and no reverse lookup to turn one into the other -
+		// so show it raw rather than drop it silently.
+		m.commandMsg = fmt.Sprintf("Node request from %s - node management isn't wired up yet", msg.event.From)
+
+	case msg.event.Type == ws.EventTypeNodeAccepted:
+		m.commandMsg = fmt.Sprintf("Node request accepted by %s - node management isn't wired up yet", msg.event.From)
+
+	default:
+		// A frame type this client has never heard of. DecodeFrame
+		// deliberately parses those instead of erroring, so the server
+		// can add event types without breaking every connected client
+		// - and there's nothing about an unknown event to tell the
+		// user yet.
+	}
+
+	return m, waitForWSFrameCmd(m.wsClient)
 }
 
 // handleBootTick advances the spinner every tick, and every
@@ -758,14 +972,15 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			At:       time.Now(),
 			Outgoing: true,
 		})
-		// TODO(wire protocol): this only appends locally for now.
-		// Actually transmitting it - sealing with SealMessage under
-		// the session key from DeriveSessionKey, then sending it
-		// through wsClient in whatever envelope synq-server's WS
-		// protocol turns out to expect - is the one piece still
-		// waiting on that protocol being specified. See internal/ws's
-		// package doc comment.
-		return m, nil
+		// The echo above is local and instant; what comes back is
+		// either the sealed frame (session key already established) or
+		// a handshake frame plus a parked body to seal once the
+		// contact's ephemeral key arrives - see messaging.go. Built
+		// before m is copied into the return value, since sendMessage
+		// may create the contact's session state (a map assignment on
+		// m itself, not just on shared state behind a pointer).
+		send := m.sendMessage(m.chatActive, []byte(body))
+		return m, send
 
 	case "backspace":
 		if len(m.chatInput) > 0 {
@@ -1261,7 +1476,15 @@ func (m Model) renderChat() string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Chat with %s\n", m.chatContactLabel(m.chatActive))
-	b.WriteString(m.theme.Muted.Render("Not yet connected to synq-server chat - messages stay local only for now.") + "\n\n")
+	// State line above the thread: how far this conversation is from
+	// being able to carry a message. Nothing to say when it already
+	// can - a quiet thread is the healthy case.
+	switch {
+	case m.wsClient == nil:
+		b.WriteString(m.theme.Muted.Render("Not connected to synq-server - anything you send stays local until the connection is back.") + "\n\n")
+	case !m.hasSessionKey(m.chatActive):
+		b.WriteString(m.theme.Muted.Render("Handshake pending - messages go out as soon as this contact's key arrives.") + "\n\n")
+	}
 
 	if len(msgs) == 0 {
 		b.WriteString("(no messages yet)\n")
@@ -1275,8 +1498,78 @@ func (m Model) renderChat() string {
 	}
 
 	fmt.Fprintf(&b, "\n> %s\n", m.chatInput)
-	b.WriteString(m.theme.Muted.Render("enter send (local only) · esc back to chat list"))
+	b.WriteString(m.theme.Muted.Render(m.composeHint()))
 	return b.String()
+}
+
+// composeHint is the line under the composer, worded to match what
+// pressing enter will actually do right now: send, hold until the
+// handshake completes, or keep local because there's no connection.
+func (m Model) composeHint() string {
+	switch {
+	case m.wsClient == nil:
+		return "enter send (stays local while disconnected) · esc back to chat list"
+	case !m.hasSessionKey(m.chatActive):
+		return "enter send (queued until the handshake completes) · esc back to chat list"
+	default:
+		return "enter send · esc back to chat list"
+	}
+}
+
+// rememberContact records everything a successful :chat lookup learned
+// about a contact, keeping the reverse index in step. Safe to call
+// again for a contact already on file - the second lookup simply
+// overwrites, and if this contact previously recorded a different user
+// id (its key was re-registered under the same account, say) the stale
+// reverse entry is removed first so no id can resolve to two contacts
+// at once. The reverse index is also allowed to move to a newer
+// contact: if someone else's ContactKey now claims a user id this
+// store had under another contact, the newest lookup wins, which is
+// the right behavior for exactly that re-registration case.
+func (m *Model) rememberContact(contact chat.ContactKey, username, userID string) {
+	if m.chatContacts == nil {
+		m.chatContacts = make(map[chat.ContactKey]contactInfo)
+		m.chatContactIDs = make(map[string]chat.ContactKey)
+	}
+
+	prev, had := m.chatContacts[contact]
+	if had && prev.UserID != "" && prev.UserID != userID && m.chatContactIDs[prev.UserID] == contact {
+		delete(m.chatContactIDs, prev.UserID)
+	}
+
+	m.chatContacts[contact] = contactInfo{Username: username, UserID: userID}
+	if userID != "" {
+		m.chatContactIDs[userID] = contact
+	}
+}
+
+// contactForUserID maps an inbound frame's sender id (Event.From, a
+// bare server-side user id) back to the contact thread it belongs to.
+// Reports false for an id we never resolved through :chat - which is
+// a real possibility, not an error: the server relays anything to
+// anybody's channel, and nothing yet ties an arbitrary inbound id to
+// a thread. Callers treat that as "no thread to put this in", not as
+// a malformed frame.
+func (m Model) contactForUserID(userID string) (chat.ContactKey, bool) {
+	if userID == "" {
+		return "", false
+	}
+	contact, ok := m.chatContactIDs[userID]
+	return contact, ok
+}
+
+// recipientUserID is the send side of contactForUserID: the id
+// ws.EncodeSend must address a frame to. Reports false when this
+// contact was never resolved through :chat, since a thread can't exist
+// without that lookup having run first (it's what opens the thread),
+// and addressing a frame with anything else - a username, a hex key -
+// is not something synq-server's wire format accepts (API.md).
+func (m Model) recipientUserID(contact chat.ContactKey) (string, bool) {
+	info, ok := m.chatContacts[contact]
+	if !ok || info.UserID == "" {
+		return "", false
+	}
+	return info.UserID, true
 }
 
 // chatContactLabel displays contact by whatever username it was last
@@ -1287,8 +1580,8 @@ func (m Model) renderChat() string {
 // chat.ContactKey itself doesn't depend on a username ever having been
 // known, so this stays correct even if that changes later).
 func (m Model) chatContactLabel(contact chat.ContactKey) string {
-	if username, ok := m.chatUsernames[contact]; ok {
-		return username
+	if info, ok := m.chatContacts[contact]; ok && info.Username != "" {
+		return info.Username
 	}
 	return shortenContactKey(contact)
 }
@@ -1347,7 +1640,7 @@ func (m Model) renderProfile() string {
 	b.WriteString("  :register <username>   register a username with synq-server (permanent)\n")
 	b.WriteString("  :login                 reconnect after :logout, without restarting\n")
 	b.WriteString("  :logout                revoke all sessions and disconnect\n")
-	b.WriteString("  :chat <username>       open or start a chat thread (local only for now)\n")
+	b.WriteString("  :chat <username>       open or start an end-to-end encrypted chat thread\n")
 	b.WriteString("  :github                link your GitHub account\n")
 	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
 	b.WriteString("  :theme <name>          set a theme directly\n")

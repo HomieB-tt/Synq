@@ -198,6 +198,120 @@ func TestClientReconnectsAfterServerDrop(t *testing.T) {
 	}
 }
 
+// newRejectingServer starts a local HTTP server that answers every
+// request with the given status and a synq-server-shaped error body -
+// what the upgrade handler does when the ?token= on a /ws dial is
+// expired or invalid (API.md: a plain 401 response, before any
+// upgrade happens).
+func newRejectingServer(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"error":"missing or invalid access token"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// stopClient closes c and waits for Run to fully exit. Tests that
+// shrink MinBackoff/MaxBackoff need this before their cleanup restores
+// the real bounds: Run reads those globals on every backoff, so
+// returning while it's still looping races the restore.
+func stopClient(t *testing.T, c *Client) {
+	t.Helper()
+	c.Close()
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Run to exit after Close")
+	}
+}
+
+// An expired access token is the one dial failure that can't heal by
+// retrying: the URL still carries the dead token. The client has to
+// say so (StatusAuthExpired), and SetURL has to be enough to fix it -
+// otherwise a long-running session reconnect-loops forever against a
+// token that expired 15 minutes in.
+func TestClientSignalsAuthExpiredAndDialsTheURLSetAfterwards(t *testing.T) {
+	oldMin, oldMax := MinBackoff, MaxBackoff
+	MinBackoff, MaxBackoff = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { MinBackoff, MaxBackoff = oldMin, oldMax })
+
+	expired := newRejectingServer(t, http.StatusUnauthorized)
+	good := newEchoServer(t, nil)
+
+	c, err := NewClient(wsURL(t, expired.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	defer stopClient(t, c)
+
+	waitForStatus(t, c, StatusAuthExpired, 2*time.Second)
+
+	// Exactly what the app does in response: swap in a URL carrying a
+	// fresh token, and let the backoff loop pick it up.
+	c.SetURL(wsURL(t, good.URL))
+
+	waitForStatus(t, c, StatusConnected, 2*time.Second)
+
+	// Connected isn't enough - confirm the new URL is the one actually
+	// being dialed, by round-tripping through the (echoing) server it
+	// points at.
+	want := "after refresh"
+	if err := c.Send([]byte(want)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case got := <-c.Incoming():
+		if string(got) != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for an echo from the server SetURL pointed at")
+	}
+}
+
+// 401 means "your credentials are wrong"; anything else the handshake
+// fails with (a proxy 404, a server restarting mid-dial) means
+// "try again" and must not trigger a token refresh, which would
+// eventually trip synq-server's auth rate limit for no reason.
+func TestClientDoesNotSignalAuthExpiredOnOtherHandshakeFailures(t *testing.T) {
+	oldMin, oldMax := MinBackoff, MaxBackoff
+	MinBackoff, MaxBackoff = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { MinBackoff, MaxBackoff = oldMin, oldMax })
+
+	notFound := newRejectingServer(t, http.StatusNotFound)
+
+	c, err := NewClient(wsURL(t, notFound.URL))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	defer stopClient(t, c)
+
+	// Long enough for plenty of failed attempts at these backoff
+	// bounds - the absence of a single AuthExpired is the assertion.
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case got := <-c.Status():
+			if got == StatusAuthExpired {
+				t.Fatalf("status %s from a %d handshake failure", got, http.StatusNotFound)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
 func TestClientClosePreventsFurtherSend(t *testing.T) {
 	srv := newEchoServer(t, nil)
 

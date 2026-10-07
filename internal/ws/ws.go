@@ -2,23 +2,19 @@
 // handling, and the per-launch ephemeral handshake described in
 // synq-DESIGN.md section 3.
 //
-// What this package deliberately does not do yet: define a wire
-// message format. synq-server (see synq-server-DESIGN.md) doesn't
-// exist as a runnable project, and nothing in this repo's design docs
-// pins down an envelope shape, endpoint path, or auth-at-connect
-// scheme - inventing one here and presenting it as settled would be
-// guessing at another project's contract, not implementing this one's.
-// Client is deliberately schema-agnostic: Send/Receive move raw
-// []byte frames, so the transport (dial, reconnect, keepalive) can be
-// built and tested for real today, and whatever envelope format
-// synq-server ends up wanting can be layered on top later without
-// touching this file.
+// This file owns only the transport: dial, reconnect, keepalive, and
+// moving raw []byte frames. The wire envelope synq-server actually
+// expects lives beside it in envelope.go, layered on top of these raw
+// bytes - Client stays schema-agnostic (Send/Incoming move []byte),
+// so the transport and the protocol can change independently, and
+// neither one's tests need to know about the other.
 package ws
 
 import (
 	"context"
 	"errors"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -39,6 +35,16 @@ const (
 	// StatusDisconnected is sent when a previously-established
 	// connection is lost and a reconnect attempt is about to begin.
 	StatusDisconnected
+	// StatusAuthExpired is sent when a dial attempt was rejected with
+	// HTTP 401 - the access token in the URL is expired, revoked, or
+	// was never valid (synq-server checks it once, at upgrade time; see
+	// API.md's "Handshake"). Unlike an ordinary failed dial, retrying
+	// alone can't fix this: whoever reads Status() is expected to get a
+	// fresh access token and hand it back with SetURL, after which the
+	// attempt already waiting in Run's backoff loop uses it. Run keeps
+	// dialing (and re-signalling) regardless, so a reader that can't
+	// refresh still gets bounded retries rather than silence.
+	StatusAuthExpired
 	// StatusClosed is sent exactly once, after Close is called and the
 	// run loop has exited for good. No further Status or Message
 	// values follow.
@@ -53,6 +59,8 @@ func (s Status) String() string {
 		return "connected"
 	case StatusDisconnected:
 		return "disconnected"
+	case StatusAuthExpired:
+		return "auth expired"
 	case StatusClosed:
 		return "closed"
 	default:
@@ -76,7 +84,12 @@ var (
 // EphemeralKeypair for its entire process lifetime (see that type's
 // doc comment) - not one per connection or reconnect attempt.
 type Client struct {
-	url string
+	// url is what each dial attempt dials. It's mutable (see SetURL)
+	// because it carries the access token as a query parameter, which
+	// expires: Run reads it once per attempt, under the lock, so a
+	// token swap during backoff is picked up by the very next dial.
+	url   string
+	urlMu sync.RWMutex
 
 	Ephemeral *EphemeralKeypair
 
@@ -107,6 +120,33 @@ func NewClient(url string) (*Client, error) {
 		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}, nil
+}
+
+// SetURL replaces the URL used for every subsequent dial attempt.
+// Safe to call from any goroutine while Run is active - including from
+// a tea.Cmd running concurrently with the backoff loop - and it takes
+// effect on the next attempt, without interrupting one that's already
+// in flight.
+//
+// This exists for one reason: the URL carries the access token
+// (?token=...), which expires, so an expired connection needs its URL
+// swapped for one with a fresh token before retrying can succeed. See
+// StatusAuthExpired for the signal that says when.
+func (c *Client) SetURL(url string) {
+	c.urlMu.Lock()
+	defer c.urlMu.Unlock()
+	c.url = url
+}
+
+// URL reports the URL the next dial attempt will use - the read side
+// of SetURL, safe to call from any goroutine. Exposed so callers that
+// swap the URL (and tests that cover that swap) can see what's
+// actually about to be dialed, which is otherwise invisible from
+// outside this package.
+func (c *Client) URL() string {
+	c.urlMu.RLock()
+	defer c.urlMu.RUnlock()
+	return c.url
 }
 
 // Status returns the channel Client delivers connection lifecycle
@@ -180,10 +220,17 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		c.sendStatus(StatusConnecting)
+		// The URL is re-read on every attempt rather than captured at
+		// NewClient, because it carries the access token (?token=...)
+		// and SetURL can swap in a fresh one while this loop backs off.
 		// DialContext closes the HTTP response body itself on both
-		// success and failure, so it's fine to discard it here.
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.url, nil)
+		// success and failure, so it's fine to keep resp only long
+		// enough to inspect the status.
+		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.URL(), nil)
 		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+				c.sendStatus(StatusAuthExpired)
+			}
 			if !c.backoff(ctx, attempt) {
 				return
 			}

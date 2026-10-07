@@ -36,4 +36,15 @@ type Session struct {
 	// Model.accessToken's doc comment for why this, specifically,
 	// never gets written anywhere.
 	AccessToken string
+
+	// RefreshToken is empty unless main.go obtained one - the same
+	// condition as AccessToken. It's handed over so a session that
+	// outlives its 15-minute access token can renew itself from inside
+	// the running TUI (see Model's reauth handling): refresh is the
+	// only way to do that without hammering synq-server's
+	// rate-limited challenge endpoints, and Model - which never holds
+	// the vault passphrase - can't read it from the vault itself.
+	// Memory only, exactly like AccessToken: nothing here is persisted
+	// back out of this process.
+	RefreshToken string
 }

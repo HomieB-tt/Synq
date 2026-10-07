@@ -56,6 +56,11 @@ func OpenKeyStore(path string) (*KeyStore, error) {
 		return nil, fmt.Errorf("db: migrate preferences schema: %w", err)
 	}
 
+	if _, err := sqldb.Exec(pinnedKeysSchema); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("db: migrate pinned keys schema: %w", err)
+	}
+
 	return &KeyStore{sqldb: sqldb}, nil
 }
 

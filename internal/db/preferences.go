@@ -37,6 +37,12 @@ const PrefGitHubHandle = "github_handle"
 // one another. See PrefUsername's doc comment for the reasoning.
 const PrefDisplayName = "display_name"
 
+// PrefBoot is the preferences key under which the startup splash's
+// on/off state is stored (internal/app's `:boot` command). "off" is
+// the only value that means anything; an unset key is the built-in
+// default of on.
+const PrefBoot = "boot"
+
 // PrefUsername is the preferences key under which the username this
 // identity has registered with synq-server is stored, once
 // registration (`:register <username>`, see internal/app) succeeds.

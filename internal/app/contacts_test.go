@@ -10,9 +10,12 @@ import (
 	"github.com/HomieB-tt/synq/internal/crypto"
 )
 
+// newResolveModel returns a Model ready for handleChatResolveResult,
+// with the real key store that handler needs to run its TOFU pin check
+// (a lookup with no store fails closed rather than opening the thread).
 func newResolveModel(t *testing.T) Model {
 	t.Helper()
-	return Model{chatStore: chat.NewStore()}
+	return Model{store: newTestKeyStore(t), chatStore: chat.NewStore()}
 }
 
 // mustBoxKey returns a fresh X25519 static public key - any valid one

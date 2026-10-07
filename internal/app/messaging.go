@@ -59,7 +59,19 @@ type chatSession struct {
 // currently offline by dropping the frame entirely, and there is no
 // server-side queue to catch that (DESIGN.md §4: the server holds no
 // message state at all).
+//
+// This is the security-relevant choke point for DESIGN.md section 2's
+// hard warning: nothing is sealed, parked, or handed to the wire for a
+// contact whose pinned key has changed. updateChatCompose checks the
+// same condition before its local echo (so a refused draft stays in
+// the composer instead of appearing sent); this second check keeps the
+// guarantee here, where encryption actually happens, rather than
+// relying on every future caller to remember it.
 func (m *Model) sendMessage(contact chat.ContactKey, body []byte) tea.Cmd {
+	if reason := m.keyBlockReason(contact); reason != "" {
+		m.commandMsg = reason
+		return nil
+	}
 	s := m.sessionFor(contact)
 	if s.key == nil {
 		s.pending = append(s.pending, body)

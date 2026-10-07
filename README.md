@@ -45,6 +45,7 @@ Requires Go 1.23+.
 | `1` `2` `3` `4` | Switch to Feed / Nodes / Chat / Profile |
 | `Tab` / `Shift+Tab` | Move focus between panes |
 | `:` or `Ctrl+P` | Open command palette |
+| `?` | Open the help panel (keys + commands); any key closes it |
 | `Ctrl+O` | Open `$EDITOR` while composing a post |
 | `q` / `Ctrl+C` | Quit |
 
@@ -56,12 +57,16 @@ Requires Go 1.23+.
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
 | `:name <your name>` | Set a local display name, shown in your own Profile tab. Purely a local, free-form, trivially-changeable label - not the same thing as the permanent `:register`ed username below (see `DESIGN.md`'s note on `PrefUsername`/`PrefDisplayName` for why those are never interchangeable). |
 | `:name clear` | Clear your local display name. |
-| `:verify <hex-pubkey>` | Compute a comparable fingerprint between your identity and a contact's, for out-of-band verification (see `DESIGN.md` section 2). Takes a raw hex-encoded public key directly - unlike `:chat`, this doesn't go through a username lookup yet. |
+| `:verify <username>` | Compare your identity's fingerprint against the key pinned for that username (`DESIGN.md` section 2), for out-of-band verification. If a key change is pending, it compares against the **new**, not-yet-accepted key - the one you're about to trust. Requires having looked the username up at least once (`:chat` them first). |
+| `:verify <hex-pubkey>` | Same fingerprint, computed against a raw hex-encoded public key instead - for a key someone handed you directly, with no lookup involved. |
+| `:accept <username>` | Trust a contact whose public key **changed** since you pinned it (the hard warning of `DESIGN.md` section 2). Until you do, sending to them is blocked; compare fingerprints with `:verify` first if you want to check out-of-band. |
 | `:register <username>` | Register a username with `synq-server`, tied to this identity. **Permanent** - there's no rename endpoint. Only needed once; if you skipped the first-launch prompt, this is the same flow. Requires `SYNQ_SERVER_URL`. |
 | `:login` | Manually re-authenticate after `:logout`, without restarting Synq. You won't normally need this - a registered identity logs in automatically and silently on every launch (see Configuration below). |
 | `:logout` | Revoke all of this account's sessions and disconnect. |
-| `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Chat history is session-only (see `DESIGN.md` section 4) and, for now, local only - composing and sending a message appends it to your own view, but nothing is actually transmitted yet, since the WS wire message format `synq-server` expects for chat isn't wired up in `internal/ws` yet. Requires being logged in. |
+| `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Messages go out end-to-end encrypted: a per-launch ephemeral handshake derives a session key (`DESIGN.md` sections 2-3), and the relay only ever sees ciphertext. The first lookup also pins their public key - a later change blocks sends until `:accept`. Chat history is session-only (see `DESIGN.md` section 4). Requires being logged in. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
+| `:help` | Same as pressing `?` - the full key/command reference. |
+| `:boot on\|off` | Show (or stop showing) the startup checklist on the next launch. On by default; the splash itself is always skippable with any key. |
 | `:quit` | Same as pressing `q`. |
 
 ## Configuration

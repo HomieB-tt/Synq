@@ -81,6 +81,19 @@ func newAPIClientFromEnv() *api.Client {
 	return api.NewClient(baseURL)
 }
 
+// synqBanner is the block-letter wordmark drawn above the landing
+// menu, so the first thing a new device sees looks like the product
+// rather than a bare numbered list. It has no color: this runs before
+// any Bubble Tea styling exists (and before we know the terminal's
+// capabilities - DESIGN.md section 7), so plain UTF-8 is all it can
+// safely rely on.
+const synqBanner = `██████╗ ██╗   ██╗███╗   ██╗██████╗ 
+██╔════╝╚██╗ ██╔╝████╗  ██║██╔══██╗
+█████╗   ╚████╔╝ ██╔██╗ ██║██████╔╝
+██╔══╝    ╚██╔╝  ██║╚██╗██║██╔══██╗
+███████╗  ██╔╝   ██║ ╚████║██████╔╝
+╚══════╝  ╚═╝    ╚═╝  ╚═══╝╚═════╝ `
+
 // runLanding is shown on a device with no identity yet, offering a
 // choice before committing to identity creation - see DESIGN.md
 // section 10 for why: creating an identity is a one-way, no-recovery
@@ -88,6 +101,8 @@ func newAPIClientFromEnv() *api.Client {
 // new device isn't the right default.
 func runLanding(ks *db.KeyStore, apiClient *api.Client) error {
 	for {
+		fmt.Println()
+		fmt.Println(synqBanner)
 		fmt.Println()
 		fmt.Println("Welcome to Synq. No identity exists on this device yet.")
 		fmt.Println()

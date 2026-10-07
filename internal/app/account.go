@@ -360,7 +360,10 @@ func resolveChatContactCmd(apiClient *api.Client, accessToken, username string) 
 // records what the lookup learned - username for display, user id for
 // addressing (see Model.rememberContact) - so the thread list can show
 // a name instead of a raw key and later sends and inbound frames have
-// an id to speak in.
+// an id to speak in. The lookup's keys also go through DESIGN.md
+// section 2's TOFU pin check first (see Model.applyPin): the thread
+// opens either way, but a key that contradicts the pin opens it with
+// sends blocked, not silently trusted.
 func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		if api.IsNotFound(msg.err) {
@@ -397,11 +400,33 @@ func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea
 	}
 
 	contact := chat.NewContactKey(contactPub)
+
+	// Trust-on-first-use (DESIGN.md section 2), before anything is
+	// opened: a first sighting pins the keys, an agreement stays
+	// quiet, and a contradiction is stashed (not adopted) so the
+	// thread below can open with sends blocked rather than encrypting
+	// to a key this device never vouched for. A pin that can't be
+	// read or written fails the lookup entirely - see pinFailed.
+	outcome, err := m.applyPin(msg.username, msg.keys)
+	if outcome == pinFailed {
+		m.commandMsg = fmt.Sprintf("Couldn't check %s's pinned key: %v - not opening the thread until that works.",
+			msg.username, err)
+		return m, nil
+	}
+
 	m.rememberContact(contact, msg.username, msg.keys.UserID)
 
 	isNew := !m.chatStore.HasThread(contact)
 	m.activeTab = tabChat
 	m.chatActive = contact
+
+	if outcome == pinChanged {
+		m.commandMsg = fmt.Sprintf(
+			"%s's key CHANGED since you pinned it - a substituted key would look exactly like this. "+
+				"Sending to them is blocked: compare fingerprints with :verify %s, or :accept %s to trust the new key.",
+			msg.username, msg.username, msg.username)
+		return m, nil
+	}
 
 	if isNew {
 		m.commandMsg = fmt.Sprintf("Started a new thread with %s.", msg.username)

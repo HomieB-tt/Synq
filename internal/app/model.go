@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image/color"
 	"net/url"
@@ -53,43 +54,6 @@ func (t tab) String() string {
 }
 
 var allTabs = []tab{tabFeed, tabNodes, tabChat, tabProfile}
-
-// bootMessages are shown in sequence on the startup splash screen, one
-// at a time, before the main TUI appears.
-//
-// "Establishing connection..." is currently cosmetic - synq-server's
-// auth/WS handshake (synq-server-DESIGN.md section 1-2) doesn't exist
-// yet, so there is no real connection to establish. This is written so
-// swapping the fixed-duration boot sequence for a real connection
-// check later only touches bootTickMsg handling in Update, not the
-// rendering code.
-var bootMessages = []string{
-	"Loading identity...",
-	"Establishing connection...",
-	"Syncing feed...",
-}
-
-// spinnerFrames is a small hand-rolled animation (deliberately not
-// using bubbles/spinner - see TECH_STACK.md on why this project avoids
-// pulling in bubbles components whose exact v2 API hasn't been
-// confirmed against live documentation).
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-const (
-	bootTickInterval = 80 * time.Millisecond
-	bootTicksPerMsg  = 6 // ~480ms shown per boot message
-)
-
-// bootTickMsg drives both the spinner animation and, every
-// bootTicksPerMsg ticks, advancing to the next boot message (or ending
-// the boot sequence after the last one).
-type bootTickMsg time.Time
-
-func bootTick() tea.Cmd {
-	return tea.Tick(bootTickInterval, func(t time.Time) tea.Msg {
-		return bootTickMsg(t)
-	})
-}
 
 // --- GitHub Device Flow wiring ---
 //
@@ -314,10 +278,17 @@ type Model struct {
 	width     int
 	height    int
 
-	// booting is true while the startup splash (header + loading
-	// animation) is showing, before the main tab UI appears.
+	// booting is true while the startup splash (header + the live
+	// launch checklist in boot.go) is showing, before the main tab UI
+	// appears. bootEnabled is the persisted `:boot` preference that
+	// decides whether booting is ever true in the first place, and
+	// bootSteps/bootStart/bootSettledAt/bootTickCount track the
+	// checklist's progress (see handleBootTick).
 	booting       bool
-	bootMsgIndex  int
+	bootEnabled   bool
+	bootSteps     []bootStep
+	bootStart     time.Time
+	bootSettledAt int // tick on which every step settled; -1 until then
 	bootTickCount int
 	spinnerFrame  int
 
@@ -337,6 +308,11 @@ type Model struct {
 	themePickerNames []string
 	themePickerIndex int
 	themePickerPrev  styles.Theme // theme active right before the picker opened; restored on Esc
+
+	// helpOpen is true while the ? / `:help` overlay is showing (see
+	// help.go). Like the theme picker it captures every key and
+	// closes on the next press.
+	helpOpen bool
 
 	// connected reflects whether Synq has a live WS connection to
 	// synq-server, driven by wsClient's Status() channel (see
@@ -452,6 +428,17 @@ type Model struct {
 	// says must not outlive the launch. See messaging.go.
 	chatSessions map[chat.ContactKey]*chatSession
 
+	// pendingKeyChanges holds lookups whose box key contradicted the
+	// pin this device already trusts for that username - the state
+	// DESIGN.md section 2's hard warning describes, waiting for the
+	// user to either :accept it (which pins it and unblocks sending)
+	// or discard the session. Session-scoped like the rest of chat:
+	// a mismatch found again on the next launch re-lands here from
+	// that launch's :chat lookup, so nothing is lost by not
+	// persisting it - what persists is the pin itself (see
+	// db.pinned_keys).
+	pendingKeyChanges map[string]*api.PublicKeys
+
 	quitting bool
 }
 
@@ -490,12 +477,23 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 	githubHandle, _ := store.LoadPreference(db.PrefGitHubHandle)
 	displayName, _ := store.LoadPreference(db.PrefDisplayName)
 
+	// The startup checklist (see boot.go) is opt-out via `:boot off` -
+	// default on, but never forced on someone who turned it off.
+	bootEnabled := true
+	if v, err := store.LoadPreference(db.PrefBoot); err == nil && v == "off" {
+		bootEnabled = false
+	}
+
 	return Model{
 		identity:       id,
 		store:          store,
 		theme:          theme,
 		activeTab:      tabFeed,
-		booting:        true,
+		booting:        bootEnabled,
+		bootEnabled:    bootEnabled,
+		bootStart:      time.Now(),
+		bootSettledAt:  -1,
+		bootSteps:      bootStepsFor(session),
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
 		displayName:    displayName,
@@ -527,7 +525,10 @@ func Run(id *crypto.Identity, store *db.KeyStore, session Session) error {
 // REST side (api.Client.ListFeed) already covers anonymous Feed
 // browsing without needing a socket at all.
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tea.RequestBackgroundColor, bootTick()}
+	cmds := []tea.Cmd{tea.RequestBackgroundColor}
+	if m.booting {
+		cmds = append(cmds, bootTick())
+	}
 	if m.apiClient != nil && m.accessToken != "" {
 		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
 	}
@@ -574,6 +575,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// way a misconfigured GitHub client ID would be, rather than
 		// crashing or silently staying "disconnected" with no
 		// explanation.
+		m.finishBootStep(bootConnect, stepFailed, string(msg))
 		m.commandMsg = string(msg)
 		return m, nil
 
@@ -607,6 +609,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		status := ws.Status(msg)
+		// The splash's connect step tracks this connection's real
+		// outcome (see boot.go): a successful dial is what "connected"
+		// means, and a 401 is a failure the boot line can name before
+		// the re-auth machinery below even starts.
+		switch status {
+		case ws.StatusConnected:
+			m.finishBootStep(bootConnect, stepDone, "")
+		case ws.StatusAuthExpired:
+			m.finishBootStep(bootConnect, stepFailed, "access token rejected by synq-server")
+		}
 		if status == ws.StatusAuthExpired {
 			// The dial was rejected because the access token carried
 			// in the URL expired (synq-server checks it once, at the
@@ -645,6 +657,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Any key skips straight to the main UI rather than
 			// trapping the user in a fixed-duration animation.
 			m.booting = false
+			return m, nil
+		}
+		if m.helpOpen {
+			// Any key closes it - same as the boot skip: the panel is
+			// reference material, not a mode with its own key map.
+			m.helpOpen = false
 			return m, nil
 		}
 		if m.themePickerOpen {
@@ -732,33 +750,6 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, waitForWSFrameCmd(m.wsClient)
-}
-
-// handleBootTick advances the spinner every tick, and every
-// bootTicksPerMsg ticks either moves to the next boot message or, after
-// the last one, ends the splash screen and stops ticking.
-func (m Model) handleBootTick() (tea.Model, tea.Cmd) {
-	if !m.booting {
-		// A stray tick arriving after boot ended (e.g. the user skipped
-		// it by pressing a key) - do nothing, and critically, don't
-		// requeue another tick, or it would tick forever in the
-		// background.
-		return m, nil
-	}
-
-	m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
-	m.bootTickCount++
-
-	if m.bootTickCount >= bootTicksPerMsg {
-		m.bootTickCount = 0
-		m.bootMsgIndex++
-		if m.bootMsgIndex >= len(bootMessages) {
-			m.booting = false
-			return m, nil
-		}
-	}
-
-	return m, bootTick()
 }
 
 // handleGitHubDeviceCode processes the result of starting the Device
@@ -898,6 +889,9 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.commandMode = true
 		m.commandInput = ""
 		m.commandMsg = ""
+
+	case "?":
+		m.helpOpen = true
 	}
 
 	return m, nil
@@ -963,10 +957,19 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		body := strings.TrimSpace(m.chatInput)
-		m.chatInput = ""
 		if body == "" {
+			m.chatInput = ""
 			return m, nil
 		}
+		if reason := m.keyBlockReason(m.chatActive); reason != "" {
+			// Refused before the local echo: a draft that can't be
+			// encrypted must not look like it was sent, and it stays
+			// in the composer so the warning doesn't eat what the
+			// user typed. See DESIGN.md section 2's hard warning.
+			m.commandMsg = reason
+			return m, nil
+		}
+		m.chatInput = ""
 		m.chatStore.Append(m.chatActive, chat.Message{
 			Body:     []byte(body),
 			At:       time.Now(),
@@ -1068,19 +1071,92 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		}
 		return fmt.Sprintf("Display name set to %q.", name), false, nil
 
+	case "accept":
+		// The acknowledgement half of DESIGN.md section 2's hard
+		// warning: adopt the stashed (contradicting) keys as the new
+		// pin, which is also what unblocks sending to that contact.
+		if len(fields) != 2 {
+			return "Usage: :accept <username>", false, nil
+		}
+		username := fields[1]
+		pending, ok := m.pendingKeyChanges[username]
+		if !ok {
+			return fmt.Sprintf("No unaccepted key change on file for %s.", username), false, nil
+		}
+		if m.store == nil {
+			return "No key store on this model - can't pin a new key.", false, nil
+		}
+		if err := m.store.PinKey(db.PinnedKey{
+			Username:      username,
+			BoxPubKey:     pending.BoxPubKey,
+			SigningPubKey: pending.PubKey,
+		}); err != nil {
+			return fmt.Sprintf("Couldn't pin %s's new key: %v", username, err), false, nil
+		}
+		contactPub, err := decodeHexBoxPublicKey(pending.BoxPubKey)
+		if err != nil {
+			// Already validated when the change was stashed (see
+			// handleChatResolveResult) - belt and braces, since
+			// unpinning here without opening the thread would leave
+			// the send path thinking the old contact is fine.
+			return fmt.Sprintf("%s's stashed key is unusable: %v", username, err), false, nil
+		}
+		delete(m.pendingKeyChanges, username)
+		contact := chat.NewContactKey(contactPub)
+		m.rememberContact(contact, username, pending.UserID)
+		m.activeTab = tabChat
+		m.chatActive = contact
+		return fmt.Sprintf("Pinned %s's new key - sending to them is unblocked. "+
+			"Messages already in their earlier thread stay there, under the old key.", username), false, nil
+
 	case "verify":
 		if m.identity == nil {
-			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
+			return "Create an identity first. Restart Synq and choose \"Create your identity\".", false, nil
 		}
 		if len(fields) != 2 {
-			return "Usage: :verify <hex-encoded public key>", false, nil
+			return "Usage: :verify <username|hex-encoded public key>", false, nil
 		}
-		theirKey, err := decodeHexPublicKey(fields[1])
+
+		// Hex form first: an out-of-band key someone handed you over
+		// another channel, compared directly. Checked before the
+		// username form because a username that happens to be valid
+		// 64-char hex is the only collision between the two, and
+		// treating it as a key is the documented (if odd) behavior.
+		if theirKey, err := decodeHexPublicKey(fields[1]); err == nil {
+			fp := crypto.Fingerprint(m.identity.SigningPublic, theirKey)
+			return fmt.Sprintf("Fingerprint: %s", fp), false, nil
+		}
+
+		username := fields[1]
+		var theirSignHex, against string
+		if pending, ok := m.pendingKeyChanges[username]; ok {
+			// Verify the key you're about to trust, not the one you
+			// already did - comparing the pin while its change is
+			// pending would just re-confirm the old fingerprint.
+			theirSignHex = pending.PubKey
+			against = " against their NEW, not-yet-accepted key"
+		} else {
+			if m.store == nil {
+				return "No key store on this model.", false, nil
+			}
+			pin, err := m.store.LoadPinnedKey(username)
+			if errors.Is(err, db.ErrPinNotFound) {
+				return fmt.Sprintf("No pinned key for %s yet - :chat %s first, then verify.", username, username), false, nil
+			}
+			if err != nil {
+				return fmt.Sprintf("Couldn't read %s's pinned key: %v", username, err), false, nil
+			}
+			theirSignHex = pin.SigningPubKey
+		}
+		if theirSignHex == "" {
+			return fmt.Sprintf("synq-server has no signing key on file for %s - nothing to compare.", username), false, nil
+		}
+		theirKey, err := decodeHexPublicKey(theirSignHex)
 		if err != nil {
-			return fmt.Sprintf("Invalid public key: %v", err), false, nil
+			return fmt.Sprintf("%s has an invalid signing key on file: %v", username, err), false, nil
 		}
 		fp := crypto.Fingerprint(m.identity.SigningPublic, theirKey)
-		return fmt.Sprintf("Fingerprint: %s", fp), false, nil
+		return fmt.Sprintf("Fingerprint%s for %s and you: %s", against, username, fp), false, nil
 
 	case "chat":
 		if m.identity == nil {
@@ -1148,6 +1224,33 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "GitHub linking isn't configured. Set SYNQ_GITHUB_CLIENT_ID and restart Synq (see README.md).", false, nil
 		}
 		return "Starting GitHub authorization...", false, requestGitHubDeviceCodeCmd(m.githubClientID)
+
+	case "help":
+		// The panel is the response - same pattern as `:theme` with
+		// no argument opening the picker instead of printing a list.
+		m.helpOpen = true
+		return "", false, nil
+
+	case "boot":
+		if len(fields) == 1 {
+			state := "on"
+			if !m.bootEnabled {
+				state = "off"
+			}
+			return fmt.Sprintf("Startup checklist: %s. Usage: :boot <on|off> (applies from the next launch).", state), false, nil
+		}
+		if len(fields) != 2 || (fields[1] != "on" && fields[1] != "off") {
+			return "Usage: :boot <on|off>", false, nil
+		}
+		m.bootEnabled = fields[1] == "on"
+		value := "off"
+		if m.bootEnabled {
+			value = "on"
+		}
+		if err := m.store.SavePreference(db.PrefBoot, value); err != nil {
+			return fmt.Sprintf("Startup checklist set to %s, but couldn't save it: %v", value, err), false, nil
+		}
+		return fmt.Sprintf("Startup checklist %s - effective from the next launch.", value), false, nil
 
 	case "quit", "q":
 		return "", true, nil
@@ -1309,36 +1412,6 @@ func placeWithBackground(block string, width, height int, bg color.Color) string
 	return strings.Join(out, "\n")
 }
 
-// renderBoot draws the startup splash: the Synq header, a subtitle,
-// and the current boot message with its spinner, all centered in the
-// terminal. Skippable by pressing any key (see the tea.KeyPressMsg
-// case in Update).
-func (m Model) renderBoot() string {
-	header := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(m.theme.Palette.Accent).
-		Background(m.theme.Palette.Background).
-		Render("SYNQ")
-
-	subtitle := m.theme.Muted.Render("terminal-native developer network")
-
-	msg := bootMessages[m.bootMsgIndex]
-	status := m.theme.StatusBar.Render(spinnerFrames[m.spinnerFrame] + " " + msg)
-
-	block := strings.Join([]string{header, "", subtitle, "", status}, "\n")
-
-	width := m.width
-	if width <= 0 {
-		width = 80
-	}
-	height := m.height
-	if height <= 0 {
-		height = 24
-	}
-
-	return placeWithBackground(block, width, height, m.theme.Palette.Background)
-}
-
 func (m Model) renderTabBar() string {
 	var parts []string
 	for i, t := range allTabs {
@@ -1417,6 +1490,9 @@ func (m Model) renderContent() string {
 	if m.themePickerOpen {
 		return placeWithBackground(m.renderThemePicker(), width, height, m.theme.Palette.Background)
 	}
+	if m.helpOpen {
+		return placeWithBackground(m.renderHelp(), width, height, m.theme.Palette.Background)
+	}
 
 	var body string
 	switch m.activeTab {
@@ -1478,12 +1554,18 @@ func (m Model) renderChat() string {
 	fmt.Fprintf(&b, "Chat with %s\n", m.chatContactLabel(m.chatActive))
 	// State line above the thread: how far this conversation is from
 	// being able to carry a message. Nothing to say when it already
-	// can - a quiet thread is the healthy case.
-	switch {
-	case m.wsClient == nil:
-		b.WriteString(m.theme.Muted.Render("Not connected to synq-server - anything you send stays local until the connection is back.") + "\n\n")
-	case !m.hasSessionKey(m.chatActive):
-		b.WriteString(m.theme.Muted.Render("Handshake pending - messages go out as soon as this contact's key arrives.") + "\n\n")
+	// can - a quiet thread is the healthy case. The pin warning
+	// outranks the others: it's the one reason the user must act
+	// before anything sends (DESIGN.md section 2).
+	if reason := m.keyBlockReason(m.chatActive); reason != "" {
+		b.WriteString(m.theme.Warning.Render(reason) + "\n\n")
+	} else {
+		switch {
+		case m.wsClient == nil:
+			b.WriteString(m.theme.Muted.Render("Not connected to synq-server - anything you send stays local until the connection is back.") + "\n\n")
+		case !m.hasSessionKey(m.chatActive):
+			b.WriteString(m.theme.Muted.Render("Handshake pending - messages go out as soon as this contact's key arrives.") + "\n\n")
+		}
 	}
 
 	if len(msgs) == 0 {
@@ -1504,8 +1586,13 @@ func (m Model) renderChat() string {
 
 // composeHint is the line under the composer, worded to match what
 // pressing enter will actually do right now: send, hold until the
-// handshake completes, or keep local because there's no connection.
+// handshake completes, keep local because there's no connection, or -
+// when the contact's pinned key has changed - not send at all.
 func (m Model) composeHint() string {
+	if m.keyBlockReason(m.chatActive) != "" {
+		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · esc back to chat list",
+			m.chatContactLabel(m.chatActive))
+	}
 	switch {
 	case m.wsClient == nil:
 		return "enter send (stays local while disconnected) · esc back to chat list"
@@ -1541,6 +1628,100 @@ func (m *Model) rememberContact(contact chat.ContactKey, username, userID string
 	if userID != "" {
 		m.chatContactIDs[userID] = contact
 	}
+}
+
+// pinOutcome is what applying DESIGN.md section 2's trust-on-first-use
+// rule to one lookup turned out to be.
+type pinOutcome int
+
+const (
+	// pinFirstUse: this device had never seen the username, so the
+	// lookup's keys became the pin.
+	pinFirstUse pinOutcome = iota
+	// pinUnchanged: the lookup agreed with the existing pin.
+	pinUnchanged
+	// pinChanged: the lookup contradicted the pin. The new keys are
+	// stashed in pendingKeyChanges for :accept, and the caller is
+	// expected to say so loudly.
+	pinChanged
+	// pinFailed: the pin couldn't be read or written. Nothing was
+	// stashed or updated - the caller must not open a thread on it,
+	// since a thread that skips the pin check is exactly the hole
+	// section 2 exists to close.
+	pinFailed
+)
+
+// applyPin runs the TOFU decision for username's freshly-looked-up
+// keys: pin on first sight, stay quiet when they match, stash (rather
+// than adopt) them when they contradict an existing pin.
+//
+// A pin mismatch does NOT overwrite the stored keys - replacing them
+// is the user's call, via :accept. The pin staying put is what lets
+// keyBlockReason keep answering "this contact changed" for as long as
+// the thread exists, and what makes :verify's fingerprint a stable
+// thing to compare out-of-band rather than one that silently follows
+// the server.
+func (m *Model) applyPin(username string, keys *api.PublicKeys) (pinOutcome, error) {
+	if m.store == nil {
+		return pinFailed, errors.New("no key store on this model")
+	}
+	pin, err := m.store.LoadPinnedKey(username)
+	switch {
+	case errors.Is(err, db.ErrPinNotFound):
+		if err := m.store.PinKey(db.PinnedKey{
+			Username:      username,
+			BoxPubKey:     keys.BoxPubKey,
+			SigningPubKey: keys.PubKey,
+		}); err != nil {
+			return pinFailed, err
+		}
+		return pinFirstUse, nil
+	case err != nil:
+		return pinFailed, err
+	case strings.EqualFold(pin.BoxPubKey, keys.BoxPubKey):
+		return pinUnchanged, nil
+	default:
+		if m.pendingKeyChanges == nil {
+			m.pendingKeyChanges = make(map[string]*api.PublicKeys)
+		}
+		m.pendingKeyChanges[username] = keys
+		return pinChanged, nil
+	}
+}
+
+// keyBlockReason reports why encrypting a new message to contact would
+// be wrong right now (DESIGN.md section 2's hard warning), or "" when
+// there's no reason to refuse.
+//
+// The comparison is against the persisted pin, not anything held in
+// the session: the pin is the thing a substituted key has to contradict,
+// and re-deriving the answer from it keeps every send-path caller
+// honest even if some earlier lookup skipped the check. A contact with
+// no username on file (a thread that predates :chat's lookup) has
+// nothing to pin against and is not blocked - see chatContactLabel for
+// why such a thread can exist.
+func (m Model) keyBlockReason(contact chat.ContactKey) string {
+	if m.store == nil || contact == "" {
+		return ""
+	}
+	info, ok := m.chatContacts[contact]
+	if !ok || info.Username == "" {
+		return ""
+	}
+	pin, err := m.store.LoadPinnedKey(info.Username)
+	if errors.Is(err, db.ErrPinNotFound) {
+		return ""
+	}
+	if err != nil {
+		return fmt.Sprintf("Can't check %s's pinned key (%v) - sending to them is blocked until that works.",
+			info.Username, err)
+	}
+	if !strings.EqualFold(pin.BoxPubKey, string(contact)) {
+		return fmt.Sprintf("%s's key changed since you pinned it - sending to them is blocked. "+
+			":verify %s compares fingerprints, :accept %s trusts the new key.",
+			info.Username, info.Username, info.Username)
+	}
+	return ""
 }
 
 // contactForUserID maps an inbound frame's sender id (Event.From, a
@@ -1694,10 +1875,10 @@ func (m Model) renderBottomBar() string {
 	}
 	if m.identity == nil {
 		return m.theme.StatusBar.Render(
-			"Guest mode - restart Synq to create an identity · 1-4 switch tabs · : command palette · q quit",
+			"Guest mode - restart Synq to create an identity · 1-4 switch tabs · : commands · ? help · q quit",
 		)
 	}
 	return m.theme.StatusBar.Render(
-		"1-4 switch tabs · Tab/Shift+Tab cycle · : command palette · q quit",
+		"1-4 switch tabs · Tab/Shift+Tab cycle · : commands · ? help · q quit",
 	)
 }

@@ -77,6 +77,8 @@ Requires Go 1.23+.
 
 Logging in is automatic for a returning, already-registered identity: on every launch, right after your passphrase unlocks the vault, Synq silently tries to refresh your stored session, falling back to a full (but still silent - no prompt) re-login using your already-unlocked identity if that fails. You'll only ever see `:login` needed manually after an explicit `:logout`.
 
+**`SYNQ_ALLOW_INSECURE_HTTP`** - Synq refuses to start with a cleartext `http://` `SYNQ_SERVER_URL` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`), because tokens would cross the network unencrypted. Set this to `1` to override on a network you trust, such as a home LAN.
+
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 
 To set it up:

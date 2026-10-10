@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -123,7 +125,10 @@ func run() error {
 	}
 	defer ks.Close()
 
-	apiClient := newAPIClientFromEnv()
+	apiClient, err := newAPIClientFromEnv()
+	if err != nil {
+		return err
+	}
 
 	has, err := ks.HasIdentity()
 	if err != nil {
@@ -151,12 +156,49 @@ func run() error {
 // every other optional integration here (SYNQ_GITHUB_CLIENT_ID,
 // previously this same env var when it only drove the WS connection
 // directly) already follows.
-func newAPIClientFromEnv() *api.Client {
+//
+// It refuses a cleartext http:// URL for any non-loopback host (see
+// validateServerURL): access tokens, refresh tokens and all traffic
+// metadata would otherwise cross the network unencrypted.
+func newAPIClientFromEnv() (*api.Client, error) {
 	baseURL := os.Getenv("SYNQ_SERVER_URL")
 	if baseURL == "" {
-		return nil
+		return nil, nil
 	}
-	return api.NewClient(baseURL)
+	if err := validateServerURL(baseURL, os.Getenv("SYNQ_ALLOW_INSECURE_HTTP") == "1"); err != nil {
+		return nil, err
+	}
+	return api.NewClient(baseURL), nil
+}
+
+// validateServerURL accepts https:// URLs, and http:// only for
+// loopback hosts (localhost, 127.0.0.0/8, ::1) used in local
+// development. allowInsecure (SYNQ_ALLOW_INSECURE_HTTP=1) is an
+// explicit override for a trusted network such as a home LAN.
+func validateServerURL(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("SYNQ_SERVER_URL is invalid: %w", err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecure || isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("SYNQ_SERVER_URL uses cleartext http:// for %q, which would send your tokens unencrypted; use https://, or set SYNQ_ALLOW_INSECURE_HTTP=1 if you trust this network", u.Hostname())
+	default:
+		return fmt.Errorf("SYNQ_SERVER_URL must start with https:// (or http://localhost for development), got scheme %q", u.Scheme)
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // synqBanner is the block-letter wordmark drawn above the landing

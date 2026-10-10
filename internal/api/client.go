@@ -26,6 +26,14 @@ import (
 	"time"
 )
 
+// maxResponseBytes bounds how much of any API response body is read
+// into memory. The largest legitimate JSON response (a full page of
+// feed posts) is around a megabyte; a server sending more than this is
+// misbehaving, and an unbounded read would let it exhaust the client's
+// memory. File transfer, when added, must stream rather than use this
+// path.
+const maxResponseBytes = 8 << 20
+
 // Client talks to one synq-server deployment, identified by BaseURL
 // (e.g. "https://synq-server-production.up.railway.app", or
 // "http://localhost:8080" for local development - see
@@ -126,9 +134,12 @@ func (c *Client) do(ctx context.Context, method, path, accessToken string, reqBo
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("api: read response body for %s %s: %w", method, path, err)
+	}
+	if len(body) > maxResponseBytes {
+		return fmt.Errorf("api: response for %s %s is larger than %d bytes", method, path, maxResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

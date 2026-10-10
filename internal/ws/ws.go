@@ -15,11 +15,50 @@ import (
 	"errors"
 	"math/rand"
 	"net/http"
+	neturl "net/url"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+const (
+	// maxIncomingBytes bounds a single message read from the server.
+	// synq-server caps what it accepts at 64 KiB and wraps it in a small
+	// envelope, so anything larger than this is a misbehaving or hostile
+	// peer; gorilla closes the connection with ErrReadLimit rather than
+	// buffering it.
+	maxIncomingBytes = 128 * 1024
+
+	// writeWait bounds each write so a stalled peer can't block the
+	// write loop forever.
+	writeWait = 10 * time.Second
+)
+
+// dialTarget splits an access token carried as a `?token=...` query
+// parameter out of raw (the form deriveWSURL builds and URL()/SetURL
+// keep exchanging) and returns the token-free URL to dial plus an
+// `Authorization: Bearer` header carrying it. A token in the URL ends
+// up in proxy and load-balancer access logs; a header does not. A raw
+// URL with no token (or one that doesn't parse) is returned unchanged
+// with no header.
+func dialTarget(raw string) (string, http.Header) {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return raw, nil
+	}
+	q := u.Query()
+	token := q.Get("token")
+	if token == "" {
+		return raw, nil
+	}
+	q.Del("token")
+	u.RawQuery = q.Encode()
+
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+token)
+	return u.String(), h
+}
 
 // Status is a Client connection-lifecycle event, delivered on
 // Client.Status() so internal/app can drive Model.connected without
@@ -130,7 +169,9 @@ func NewClient(url string) (*Client, error) {
 //
 // This exists for one reason: the URL carries the access token
 // (?token=...), which expires, so an expired connection needs its URL
-// swapped for one with a fresh token before retrying can succeed. See
+// swapped for one with a fresh token before retrying can succeed. The
+// token is lifted out of the URL at dial time and sent as an
+// Authorization header instead (see dialTarget). See
 // StatusAuthExpired for the signal that says when.
 func (c *Client) SetURL(url string) {
 	c.urlMu.Lock()
@@ -226,7 +267,8 @@ func (c *Client) Run(ctx context.Context) {
 		// DialContext closes the HTTP response body itself on both
 		// success and failure, so it's fine to keep resp only long
 		// enough to inspect the status.
-		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.URL(), nil)
+		target, header := dialTarget(c.URL())
+		conn, resp, err := websocket.DefaultDialer.DialContext(ctx, target, header)
 		if err != nil {
 			if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 				c.sendStatus(StatusAuthExpired)
@@ -263,6 +305,22 @@ func (c *Client) runConnection(ctx context.Context, conn *websocket.Conn) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Read-side hardening. These must be configured before the reader
+	// goroutine starts (gorilla's setters aren't safe to call while a
+	// read is in flight).
+	//
+	// The read deadline is pushed forward every time a pong arrives, so
+	// a half-open connection - one where the network died without a
+	// close frame - stops looking "connected" after about one ping
+	// interval plus timeout and the run loop reconnects, instead of
+	// silently losing messages until the OS notices minutes later.
+	conn.SetReadLimit(maxIncomingBytes)
+	pongWait := pingInterval + pingTimeout
+	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	readErr := make(chan error, 1)
 	go func() {
 		for {
@@ -295,6 +353,7 @@ func (c *Client) runConnection(ctx context.Context, conn *websocket.Conn) {
 			_ = err // the loop in Run treats any exit from here the same: reconnect
 			return
 		case msg := <-c.outgoing:
+			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}

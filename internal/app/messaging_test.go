@@ -363,9 +363,9 @@ func TestSealedFrameWithoutASessionIsReportedNotOpened(t *testing.T) {
 
 	// Sealed under a key that was never exchanged with Bob.
 	var unknownKey [32]byte
-	sealed, err := ws.SealMessage(&unknownKey, []byte("too early"))
+	sealed, err := ws.SealCounted(&unknownKey, 1, []byte("too early"))
 	if err != nil {
-		t.Fatalf("SealMessage: %v", err)
+		t.Fatalf("SealCounted: %v", err)
 	}
 
 	if cmd := b.handleIncomingPayload(aliceThread, ws.EncodeSealed(sealed)); cmd != nil {
@@ -379,12 +379,10 @@ func TestSealedFrameWithoutASessionIsReportedNotOpened(t *testing.T) {
 	}
 }
 
-// A body that fails authentication means the key in hand is the wrong
-// one (the contact relaunched, or the frame was tampered with).
-// Discarding the session is what lets the next handshake re-establish
-// instead of leaving this thread wedged on a key that can't open
-// anything.
-func TestFailedOpenResetsTheSessionSoTheNextHandshakeCanFix(t *testing.T) {
+// establishedModel returns a model for Bob with a completed handshake
+// with Alice, plus the contact key and Alice's ephemeral key.
+func establishedModel(t *testing.T) (Model, chat.ContactKey, *[32]byte) {
+	t.Helper()
 	alice, err := crypto.GenerateIdentity()
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -393,50 +391,158 @@ func TestFailedOpenResetsTheSessionSoTheNextHandshakeCanFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
-
-	aliceClient, err := ws.NewClient("ws://example.invalid/ws")
+	client, err := ws.NewClient("ws://example.invalid/ws")
 	if err != nil {
 		t.Fatalf("ws.NewClient: %v", err)
 	}
-	b := Model{identity: bob, wsClient: aliceClient, chatStore: chat.NewStore()}
-	aliceThread := chat.NewContactKey(alice.BoxPublic)
-	b.rememberContact(aliceThread, "alice", "user-a")
+	b := Model{identity: bob, wsClient: client, chatStore: chat.NewStore()}
+	thread := chat.NewContactKey(alice.BoxPublic)
+	b.rememberContact(thread, "alice", "user-a")
 
-	// Complete a handshake so a key exists. The ephemeral key it
-	// carries is this client's own stand-in for Alice's - arbitrary
-	// bytes, since the next step is what's under test.
-	aliceEph, err := ws.NewEphemeralKeypair()
+	eph, err := ws.NewEphemeralKeypair()
 	if err != nil {
 		t.Fatalf("NewEphemeralKeypair: %v", err)
 	}
-	payload, err := ws.EncodeHandshake(aliceEph.Public)
+	b.handleIncomingPayload(thread, mustHandshake(t, eph.Public))
+	if !b.hasSessionKey(thread) {
+		t.Fatal("handshake didn't establish a key")
+	}
+	return b, thread, eph.Public
+}
+
+func mustHandshake(t *testing.T, pub *[32]byte) []byte {
+	t.Helper()
+	payload, err := ws.EncodeHandshake(pub)
 	if err != nil {
 		t.Fatalf("EncodeHandshake: %v", err)
 	}
-	b.handleIncomingPayload(aliceThread, payload)
-	if !b.hasSessionKey(aliceThread) {
-		t.Fatal("handshake didn't establish a key")
-	}
+	return payload
+}
 
-	// ...then open a message sealed under a *different* key.
-	var otherKey [32]byte
-	sealed, err := ws.SealMessage(&otherKey, []byte("from a stale session"))
+// What Alice would send Bob: sealed under Bob's receive key.
+func fromAlice(t *testing.T, b *Model, thread chat.ContactKey, counter uint64, body string) []byte {
+	t.Helper()
+	_, recv, err := b.directionKeys(thread, b.sessionFor(thread))
 	if err != nil {
-		t.Fatalf("SealMessage: %v", err)
+		t.Fatalf("directionKeys: %v", err)
 	}
-	b.handleIncomingPayload(aliceThread, ws.EncodeSealed(sealed))
+	sealed, err := ws.SealCounted(recv, counter, []byte(body))
+	if err != nil {
+		t.Fatalf("SealCounted: %v", err)
+	}
+	return ws.EncodeSealed(sealed)
+}
 
-	if b.hasSessionKey(aliceThread) {
-		t.Error("session key kept after an authentication failure")
+// A body that fails authentication is dropped and reported, but the
+// session is left alone: resetting it would let anyone who can inject
+// one bad frame wedge the thread, since the contact has no reason to
+// resend their handshake.
+func TestFailedOpenDropsTheFrameButKeepsTheSession(t *testing.T) {
+	b, thread, _ := establishedModel(t)
+
+	var otherKey [32]byte
+	sealed, err := ws.SealCounted(&otherKey, 1, []byte("forged"))
+	if err != nil {
+		t.Fatalf("SealCounted: %v", err)
 	}
-	if s := b.chatSessions[aliceThread]; s.peerSeen || s.peerEphemeral != nil {
-		t.Error("peer handshake state kept after an authentication failure")
+	b.handleIncomingPayload(thread, ws.EncodeSealed(sealed))
+
+	if !b.hasSessionKey(thread) {
+		t.Error("session key discarded after one forged frame")
 	}
-	if msgs := b.chatStore.Messages(aliceThread); len(msgs) != 0 {
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 0 {
 		t.Errorf("stored %d messages that failed to open", len(msgs))
 	}
-	if !strings.Contains(b.commandMsg, "resetting") {
-		t.Errorf("commandMsg = %q, want it to say the handshake was reset", b.commandMsg)
+	if !strings.Contains(b.commandMsg, "didn't verify") {
+		t.Errorf("commandMsg = %q, want it to say the frame didn't verify", b.commandMsg)
+	}
+
+	// And real traffic still works afterwards.
+	b.handleIncomingPayload(thread, fromAlice(t, &b, thread, 1, "real"))
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 1 || string(msgs[0].Body) != "real" {
+		t.Errorf("real message after a forged one: %d messages", len(msgs))
+	}
+}
+
+func TestReplayedSealedFrameIsShownOnce(t *testing.T) {
+	b, thread, _ := establishedModel(t)
+	frame := fromAlice(t, &b, thread, 1, "pay me")
+
+	b.handleIncomingPayload(thread, frame)
+	b.handleIncomingPayload(thread, frame)
+
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 1 {
+		t.Fatalf("thread has %d messages after a replay, want 1", len(msgs))
+	}
+	if !strings.Contains(b.commandMsg, "repeated") {
+		t.Errorf("commandMsg = %q, want it to mention the repeat", b.commandMsg)
+	}
+}
+
+func TestOutOfOrderMessagesAreAllDelivered(t *testing.T) {
+	b, thread, _ := establishedModel(t)
+	for _, c := range []uint64{2, 3, 1} {
+		b.handleIncomingPayload(thread, fromAlice(t, &b, thread, c, "m"))
+	}
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 3 {
+		t.Errorf("delivered %d of 3 reordered messages", len(msgs))
+	}
+}
+
+// A relay can hand a client its own outgoing message back. It is sealed
+// under our send key, which is not the key we open with.
+func TestReflectedMessageIsRejected(t *testing.T) {
+	b, thread, _ := establishedModel(t)
+	send, _, err := b.directionKeys(thread, b.sessionFor(thread))
+	if err != nil {
+		t.Fatalf("directionKeys: %v", err)
+	}
+	sealed, err := ws.SealCounted(send, 1, []byte("my own words"))
+	if err != nil {
+		t.Fatalf("SealCounted: %v", err)
+	}
+	b.handleIncomingPayload(thread, ws.EncodeSealed(sealed))
+
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 0 {
+		t.Errorf("accepted a reflected message as incoming (%d stored)", len(msgs))
+	}
+}
+
+// Replaying an old handshake must not step the session back to a key
+// whose messages may have been recorded, nor reset the counters.
+func TestStaleHandshakeReplayIsIgnored(t *testing.T) {
+	b, thread, eph1 := establishedModel(t)
+	first := fromAlice(t, &b, thread, 1, "one")
+	b.handleIncomingPayload(thread, first)
+
+	// Alice relaunches: new ephemeral key.
+	eph2, err := ws.NewEphemeralKeypair()
+	if err != nil {
+		t.Fatalf("NewEphemeralKeypair: %v", err)
+	}
+	b.handleIncomingPayload(thread, mustHandshake(t, eph2.Public))
+
+	// Attacker replays the old handshake, then the old message.
+	b.handleIncomingPayload(thread, mustHandshake(t, eph1))
+	if s := b.chatSessions[thread]; !sameKey(s.peerEphemeral, eph2.Public) {
+		t.Fatal("a replayed old handshake moved the session back to the old key")
+	}
+	b.handleIncomingPayload(thread, first)
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 1 {
+		t.Errorf("thread has %d messages, want only the original one", len(msgs))
+	}
+}
+
+// Counters accepted under a key stay remembered even when a handshake
+// frame repeating that key arrives in between.
+func TestRepeatedHandshakeDoesNotReopenTheReplayWindow(t *testing.T) {
+	b, thread, eph := establishedModel(t)
+	frame := fromAlice(t, &b, thread, 1, "once")
+	b.handleIncomingPayload(thread, frame)
+	b.handleIncomingPayload(thread, mustHandshake(t, eph))
+	b.handleIncomingPayload(thread, frame)
+	if msgs := b.chatStore.Messages(thread); len(msgs) != 1 {
+		t.Errorf("thread has %d messages, want 1", len(msgs))
 	}
 }
 

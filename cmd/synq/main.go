@@ -428,7 +428,7 @@ func registerUsername(ctx context.Context, apiClient *api.Client, id *crypto.Ide
 		return nil, fmt.Errorf("request challenge: %w", err)
 	}
 	sig := id.SignChallenge(challenge)
-	tokens, err := apiClient.RegisterVerify(ctx, username, id.SigningPublicHex(), id.BoxPublicHex(), sig)
+	tokens, err := apiClient.RegisterVerify(ctx, username, id.SigningPublicHex(), id.BoxPublicHex(), id.SignBoxKey(username), sig)
 	if err != nil {
 		return nil, fmt.Errorf("verify registration: %w", err)
 	}

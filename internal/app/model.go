@@ -531,6 +531,7 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.apiClient != nil && m.accessToken != "" {
 		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
+		cmds = append(cmds, uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username))
 	}
 	return tea.Batch(cmds...)
 }

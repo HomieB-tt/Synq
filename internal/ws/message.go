@@ -2,6 +2,7 @@ package ws
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -74,4 +75,55 @@ func OpenMessage(sessionKey *[32]byte, sealed []byte) ([]byte, error) {
 		return nil, ErrMessageAuthFailed
 	}
 	return plaintext, nil
+}
+
+// counterSize is the length of the message counter SealCounted places in
+// front of the plaintext: a big-endian uint64.
+const counterSize = 8
+
+// ErrMessageMalformed means a message authenticated correctly but is too
+// short to hold the counter every sealed message carries - a peer
+// speaking a different version of the protocol, not tampering (tampering
+// fails authentication first).
+var ErrMessageMalformed = errors.New("ws: sealed message has no counter")
+
+// SealCounted seals plaintext under sendKey - one of the two directional
+// keys from DirectionalKeys - with counter bound inside the
+// authenticated plaintext (counter || plaintext). The receiver recovers
+// it with OpenCounted and refuses any counter it has already accepted
+// (see ReplayWindow), which is what stops a relay from re-delivering a
+// recorded message. Because the counter is inside the sealed bytes, it
+// can't be changed or removed without failing authentication.
+//
+// The nonce is still a fresh random one per message (see SealMessage):
+// the counter provides ordering and replay detection, not nonce
+// uniqueness, so a counter that ever repeated could not cause nonce
+// reuse.
+func SealCounted(sendKey *[32]byte, counter uint64, plaintext []byte) ([]byte, error) {
+	buf := make([]byte, counterSize+len(plaintext))
+	binary.BigEndian.PutUint64(buf, counter)
+	copy(buf[counterSize:], plaintext)
+	return SealMessage(sendKey, buf)
+}
+
+// OpenCounted reverses SealCounted: it authenticates and decrypts sealed
+// under recvKey and returns the message counter and the plaintext. It
+// does not itself check the counter for freshness - the caller must pass
+// it to a ReplayWindow, and only after this call has succeeded, so that
+// forged frames can't move the window.
+//
+// recvKey must be the OTHER direction's key from the one this client
+// seals with. That is what defeats reflection: a relay that sends our own
+// ciphertext back to us as if the contact had written it fails
+// authentication here, because it was sealed under our send key, not our
+// receive key.
+func OpenCounted(recvKey *[32]byte, sealed []byte) (uint64, []byte, error) {
+	buf, err := OpenMessage(recvKey, sealed)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(buf) < counterSize {
+		return 0, nil, ErrMessageMalformed
+	}
+	return binary.BigEndian.Uint64(buf[:counterSize]), buf[counterSize:], nil
 }

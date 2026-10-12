@@ -119,15 +119,25 @@ func TestHandleWSFrameRoutesMessageIntoTheContactThread(t *testing.T) {
 	}
 	contact := chat.NewContactKey(alice.BoxPublic)
 
+	bob, err := crypto.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
 	m := newFrameModel(t)
+	m.identity = bob
 	m.chatStore = chat.NewStore()
 	m.rememberContact(contact, "alice", "user-a")
 	var key [32]byte
 	m.sessionFor(contact).key = &key
 
-	sealed, err := ws.SealMessage(&key, []byte("wired"))
+	// Alice's send key is this model's receive key.
+	_, aliceSendKey, err := m.directionKeys(contact, m.sessionFor(contact))
 	if err != nil {
-		t.Fatalf("SealMessage: %v", err)
+		t.Fatalf("directionKeys: %v", err)
+	}
+	sealed, err := ws.SealCounted(aliceSendKey, 1, []byte("wired"))
+	if err != nil {
+		t.Fatalf("SealCounted: %v", err)
 	}
 	got, out := frameToModel(t, m, wsFrameMsg{
 		event: ws.Event{Type: ws.EventTypeMessage, From: "user-a", Payload: ws.EncodeSealed(sealed)},

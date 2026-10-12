@@ -55,7 +55,7 @@ func registerUsernameCmd(apiClient *api.Client, id *crypto.Identity, username st
 			return registerResultMsg{username: username, err: fmt.Errorf("request challenge: %w", err)}
 		}
 		sig := id.SignChallenge(challenge)
-		tokens, err := apiClient.RegisterVerify(ctx, username, id.SigningPublicHex(), id.BoxPublicHex(), sig)
+		tokens, err := apiClient.RegisterVerify(ctx, username, id.SigningPublicHex(), id.BoxPublicHex(), id.SignBoxKey(username), sig)
 		if err != nil {
 			return registerResultMsg{username: username, err: fmt.Errorf("verify registration: %w", err)}
 		}
@@ -158,7 +158,28 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	m.reauthRetryAfter = time.Time{}
 	m.reauthInFlight = false
 	m.commandMsg = fmt.Sprintf("Logged in as %s.", m.username)
-	return m, startWSCmd(m.apiClient.BaseURL, m.accessToken)
+	return m, tea.Batch(
+		startWSCmd(m.apiClient.BaseURL, m.accessToken),
+		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
+	)
+}
+
+// uploadBoxKeySigCmd makes sure the server holds this account's box-key
+// binding signature. New registrations send it up front; this covers
+// accounts registered before the server stored one, so other clients
+// stop refusing to chat with them. Best effort and silent: it is
+// idempotent, a failure just means trying again at the next login, and
+// there's nothing the user could do about it.
+func uploadBoxKeySigCmd(apiClient *api.Client, accessToken string, id *crypto.Identity, username string) tea.Cmd {
+	if apiClient == nil || accessToken == "" || id == nil || username == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
+		defer cancel()
+		_ = apiClient.UploadBoxKeySig(ctx, accessToken, id.SignBoxKey(username))
+		return nil
+	}
 }
 
 // --- :logout ---
@@ -385,6 +406,20 @@ func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea
 	contactPub, err := decodeHexBoxPublicKey(msg.keys.BoxPubKey)
 	if err != nil {
 		m.commandMsg = fmt.Sprintf("%s has an invalid public key on file: %v", msg.username, err)
+		return m, nil
+	}
+
+	// The box key came from synq-server, which isn't trusted, and the
+	// fingerprint :verify shows covers only the identity key. The
+	// identity key's signature over the box key is what ties the two
+	// together; without a valid one the key could have been swapped, so
+	// it is neither pinned nor opened as a thread.
+	if err := crypto.VerifyBoxKeyBinding(msg.keys.PubKey, msg.username, msg.keys.BoxPubKey, msg.keys.BoxKeySig); err != nil {
+		if errors.Is(err, crypto.ErrBoxKeyUnsigned) {
+			m.commandMsg = fmt.Sprintf("%s's encryption key isn't signed yet - they need to update Synq and log in once before you can chat.", msg.username)
+		} else {
+			m.commandMsg = fmt.Sprintf("%s's encryption key signature doesn't verify - not trusting that key. The server may be serving a substituted one.", msg.username)
+		}
 		return m, nil
 	}
 

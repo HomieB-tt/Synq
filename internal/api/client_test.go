@@ -43,7 +43,7 @@ func TestRegisterVerifySendsExactFieldsAndParsesTokens(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(TokenPair{AccessToken: "access-123", RefreshToken: "refresh-456"})
 	})
 
-	tokens, err := client.RegisterVerify(ctx(t), "alice", "pubkeyhex", "boxkeyhex", "sighex")
+	tokens, err := client.RegisterVerify(ctx(t), "alice", "pubkeyhex", "boxkeyhex", "boxsighex", "sighex")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestRegisterVerifySendsExactFieldsAndParsesTokens(t *testing.T) {
 		t.Errorf("expected no Authorization header on register/verify (pre-auth), got %q", gotAuth)
 	}
 	wantBody := map[string]string{
-		"username": "alice", "pub_key": "pubkeyhex", "box_pub_key": "boxkeyhex", "signature": "sighex",
+		"username": "alice", "pub_key": "pubkeyhex", "box_pub_key": "boxkeyhex", "box_key_sig": "boxsighex", "signature": "sighex",
 	}
 	for k, v := range wantBody {
 		if gotBody[k] != v {

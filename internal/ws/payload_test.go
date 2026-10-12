@@ -69,6 +69,7 @@ func TestDecodePayloadRejectsWhatItCannotUnderstand(t *testing.T) {
 		{"tag only handshake", []byte{byte(PayloadKindHandshake)}, "no body"},
 		{"tag only sealed", []byte{byte(PayloadKindSealed)}, "no body"},
 		{"unknown kind", []byte{0x7f, 'x'}, "unknown payload kind"},
+		{"legacy sealed kind", []byte{0x02, 'x'}, "replay protection"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := DecodePayload(tc.payload)
@@ -89,9 +90,10 @@ func TestParseHandshakeRejectsMalformedFrames(t *testing.T) {
 		wantErr string
 	}{
 		{"not json", "definitely not json", "parse handshake"},
-		{"future version", `{"v":2,"eph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`, "unsupported handshake version"},
-		{"ephemeral not base64", `{"v":1,"eph":"!!!"}`, "not valid base64"},
-		{"wrong key length", `{"v":1,"eph":"AQID"}`, "3 bytes"},
+		{"v1 handshake", `{"v":1,"eph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`, "needs to update"},
+		{"future version", `{"v":3,"eph":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`, "unsupported handshake version"},
+		{"ephemeral not base64", `{"v":2,"eph":"!!!"}`, "not valid base64"},
+		{"wrong key length", `{"v":2,"eph":"AQID"}`, "3 bytes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseHandshake([]byte(tc.body))

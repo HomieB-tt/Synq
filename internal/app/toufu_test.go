@@ -50,14 +50,47 @@ func randomKeyHex(t *testing.T, n int) string {
 	return hex.EncodeToString(raw)
 }
 
-func lookupResult(username, boxHex, signHex string) chatResolveResultMsg {
+// signer is a contact's Ed25519 identity key, as the lookup would show
+// it - with the private half, so a test can produce the box-key binding
+// signature a real contact's client would upload.
+type signer struct {
+	pub  ed25519.PublicKey
+	priv ed25519.PrivateKey
+}
+
+func newSigner(t *testing.T) signer {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	return signer{pub: pub, priv: priv}
+}
+
+func (s signer) hex() string { return hex.EncodeToString(s.pub) }
+
+// bind signs the binding of boxHex to username, the way
+// crypto.Identity.SignBoxKey does for a real identity.
+func (s signer) bind(username, boxHex string) string {
+	raw, err := hex.DecodeString(boxHex)
+	if err != nil || len(raw) != 32 {
+		return ""
+	}
+	var box [32]byte
+	copy(box[:], raw)
+	return hex.EncodeToString(ed25519.Sign(s.priv, crypto.BoxKeyBindingMessage(username, &box)))
+}
+
+// lookupResult is a correctly signed lookup response for username.
+func lookupResult(username, boxHex string, s signer) chatResolveResultMsg {
 	return chatResolveResultMsg{
 		username: username,
 		keys: &api.PublicKeys{
 			UserID:    "user-1",
 			Username:  username,
-			PubKey:    signHex,
+			PubKey:    s.hex(),
 			BoxPubKey: boxHex,
+			BoxKeySig: s.bind(username, boxHex),
 		},
 	}
 }
@@ -85,7 +118,7 @@ func mustPin(t *testing.T, ks *db.KeyStore, pk db.PinnedKey) {
 // the "first use" half of DESIGN.md section 2.
 func TestFirstLookupPinsTheKey(t *testing.T) {
 	m := newPinModel(t)
-	box, sign := randomKeyHex(t, 32), randomKeyHex(t, 32)
+	box, sign := randomKeyHex(t, 32), newSigner(t)
 
 	m = runResolve(t, m, lookupResult("alice", box, sign))
 
@@ -93,7 +126,7 @@ func TestFirstLookupPinsTheKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPinnedKey: %v", err)
 	}
-	if pin.BoxPubKey != box || pin.SigningPubKey != sign {
+	if pin.BoxPubKey != box || pin.SigningPubKey != sign.hex() {
 		t.Errorf("pin = %+v, want the looked-up keys", pin)
 	}
 	if len(m.pendingKeyChanges) != 0 {
@@ -111,7 +144,7 @@ func TestFirstLookupPinsTheKey(t *testing.T) {
 // quiet, unblocked, nothing stashed.
 func TestMatchingLookupOpensQuietly(t *testing.T) {
 	m := newPinModel(t)
-	box, sign := randomKeyHex(t, 32), randomKeyHex(t, 32)
+	box, sign := randomKeyHex(t, 32), newSigner(t)
 
 	m = runResolve(t, m, lookupResult("alice", box, sign))
 	m = runResolve(t, m, lookupResult("alice", box, sign))
@@ -133,7 +166,7 @@ func TestMatchingLookupOpensQuietly(t *testing.T) {
 func TestChangedKeyWarnsAndBlocksSends(t *testing.T) {
 	m := newPinModel(t)
 	oldBox, newBox := randomKeyHex(t, 32), randomKeyHex(t, 32)
-	sign := randomKeyHex(t, 32)
+	sign := newSigner(t)
 
 	m = runResolve(t, m, lookupResult("alice", oldBox, sign))
 	m = runResolve(t, m, lookupResult("alice", newBox, sign))
@@ -191,7 +224,7 @@ func TestChangedKeyWarnsAndBlocksSends(t *testing.T) {
 func TestAcceptUnblocksSends(t *testing.T) {
 	m := newPinModel(t)
 	oldBox, newBox := randomKeyHex(t, 32), randomKeyHex(t, 32)
-	sign := randomKeyHex(t, 32)
+	sign := newSigner(t)
 
 	m = runResolve(t, m, lookupResult("alice", oldBox, sign))
 	m = runResolve(t, m, lookupResult("alice", newBox, sign))
@@ -235,7 +268,7 @@ func TestPinCheckFailureKeepsThreadClosed(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), randomKeyHex(t, 32)))
+	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), newSigner(t)))
 
 	if m.chatActive != "" {
 		t.Errorf("chatActive = %q, want no thread opened on a failed pin check", m.chatActive)
@@ -250,11 +283,11 @@ func TestPinCheckFailureKeepsThreadClosed(t *testing.T) {
 // would say today.
 func TestVerifyUsernameUsesThePin(t *testing.T) {
 	m := newPinModel(t)
-	box, sign := randomKeyHex(t, 32), randomKeyHex(t, 32)
+	box, sign := randomKeyHex(t, 32), newSigner(t)
 	m = runResolve(t, m, lookupResult("alice", box, sign))
 
 	result, _, _ := m.runCommand("verify alice")
-	theirKey, err := hex.DecodeString(sign)
+	theirKey, err := hex.DecodeString(sign.hex())
 	if err != nil {
 		t.Fatalf("DecodeString: %v", err)
 	}
@@ -272,12 +305,12 @@ func TestVerifyUsernameUsesThePin(t *testing.T) {
 // what the user already checked.
 func TestVerifyUsernamePrefersThePendingKey(t *testing.T) {
 	m := newPinModel(t)
-	oldSign, newSign := randomKeyHex(t, 32), randomKeyHex(t, 32)
+	oldSign, newSign := newSigner(t), newSigner(t)
 	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), oldSign))
 	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), newSign))
 
 	result, _, _ := m.runCommand("verify alice")
-	theirKey, err := hex.DecodeString(newSign)
+	theirKey, err := hex.DecodeString(newSign.hex())
 	if err != nil {
 		t.Fatalf("DecodeString: %v", err)
 	}
@@ -343,7 +376,7 @@ func TestKeyBlockReasonToleratesAModelWithoutAStore(t *testing.T) {
 func TestBlockedThreadWarnsInRender(t *testing.T) {
 	m := newPinModel(t)
 	oldBox, newBox := randomKeyHex(t, 32), randomKeyHex(t, 32)
-	sign := randomKeyHex(t, 32)
+	sign := newSigner(t)
 
 	m = runResolve(t, m, lookupResult("alice", oldBox, sign))
 	m = runResolve(t, m, lookupResult("alice", newBox, sign))
@@ -353,5 +386,61 @@ func TestBlockedThreadWarnsInRender(t *testing.T) {
 	}
 	if out := m.renderChat(); !strings.Contains(out, "key changed") {
 		t.Errorf("renderChat = %q, want the pin-change banner", out)
+	}
+}
+
+// A box key the identity key never signed - what a server substituting
+// its own key would have to serve - is refused before it can be pinned
+// or opened as a thread.
+func TestLookupWithAForgedBoxKeySignatureIsRefused(t *testing.T) {
+	m := newPinModel(t)
+	real, attacker := newSigner(t), newSigner(t)
+	box := randomKeyHex(t, 32)
+
+	msg := lookupResult("alice", box, real)
+	msg.keys.BoxKeySig = attacker.bind("alice", box)
+	m = runResolve(t, m, msg)
+
+	if _, err := m.store.LoadPinnedKey("alice"); err == nil {
+		t.Error("pinned a box key whose signature did not verify")
+	}
+	if m.chatActive != "" || m.activeTab == tabChat {
+		t.Error("opened a thread for a contact whose box key is unauthenticated")
+	}
+	if !strings.Contains(m.commandMsg, "signature") {
+		t.Errorf("commandMsg = %q, want it to mention the signature", m.commandMsg)
+	}
+}
+
+// Accounts that predate binding signatures have none; chatting with
+// them is declined with an explanation rather than trusting the key.
+func TestLookupWithoutABoxKeySignatureIsRefused(t *testing.T) {
+	m := newPinModel(t)
+	msg := lookupResult("alice", randomKeyHex(t, 32), newSigner(t))
+	msg.keys.BoxKeySig = ""
+	m = runResolve(t, m, msg)
+
+	if _, err := m.store.LoadPinnedKey("alice"); err == nil {
+		t.Error("pinned an unsigned box key")
+	}
+	if m.chatActive != "" {
+		t.Error("opened a thread for an unsigned box key")
+	}
+	if !strings.Contains(m.commandMsg, "update") {
+		t.Errorf("commandMsg = %q, want it to say the contact needs to update", m.commandMsg)
+	}
+}
+
+// A swapped box key under the SAME identity, correctly signed, is a
+// legitimate rotation and goes through the normal pin-changed path.
+// One signed by a different identity cannot reach that path at all,
+// because the lookup's own identity key then differs too.
+func TestSignedBoxKeyUnderTheSameIdentityStillTriggersTheChangedWarning(t *testing.T) {
+	m := newPinModel(t)
+	s := newSigner(t)
+	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), s))
+	m = runResolve(t, m, lookupResult("alice", randomKeyHex(t, 32), s))
+	if len(m.pendingKeyChanges) != 1 {
+		t.Errorf("pendingKeyChanges = %d, want the rotation stashed for :accept", len(m.pendingKeyChanges))
 	}
 }

@@ -17,6 +17,20 @@ type PublicKeys struct {
 	Username  string `json:"username"`
 	PubKey    string `json:"pub_key"`
 	BoxPubKey string `json:"box_pub_key"`
+
+	// BoxKeySig is the owner's Ed25519 signature binding BoxPubKey to
+	// Username (see crypto.VerifyBoxKeyBinding). Empty for accounts that
+	// predate it and haven't uploaded one. Callers must verify it before
+	// trusting BoxPubKey - the server is not trusted to have done so.
+	BoxKeySig string `json:"box_key_sig"`
+}
+
+// UploadBoxKeySig attaches a box-key binding signature to the caller's
+// own account. For accounts registered before the server stored them;
+// idempotent, since Ed25519 signatures are deterministic. Requires auth.
+func (c *Client) UploadBoxKeySig(ctx context.Context, accessToken, boxKeySigHex string) error {
+	return c.do(ctx, http.MethodPut, "/users/me/box-key-sig", accessToken,
+		map[string]string{"box_key_sig": boxKeySigHex}, nil)
 }
 
 // GetPublicKeys looks up username's public keys. Requires auth - a

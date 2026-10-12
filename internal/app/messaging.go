@@ -49,6 +49,13 @@ type chatSession struct {
 	// §3's forward secrecy is *not* providing, kept as short as one
 	// round trip and held in memory only.
 	pending [][]byte
+
+	// epochs holds the replay-protection counters, keyed by the pair of
+	// ephemeral keys a session key was built from. It is deliberately
+	// never reset - not on a new handshake, not on a failed open -
+	// because forgetting accepted counters is what would let a relay
+	// replay old messages. See ws.Epochs.
+	epochs ws.Epochs
 }
 
 // sendMessage hands one body the user just typed to contact: sealed
@@ -107,7 +114,17 @@ func (m *Model) handshakeCmd(contact chat.ContactKey, s *chatSession) tea.Cmd {
 // been appended either way (see updateChatCompose), so the user sees
 // what they wrote even if the wire disagreed.
 func (m *Model) sealAndSendCmd(contact chat.ContactKey, s *chatSession, body []byte) tea.Cmd {
-	sealed, err := ws.SealMessage(s.key, body)
+	sendKey, _, err := m.directionKeys(contact, s)
+	if err != nil {
+		m.commandMsg = fmt.Sprintf("Couldn't encrypt that message: %v", err)
+		return nil
+	}
+	counter, err := m.epochFor(s).Send.Next()
+	if err != nil {
+		m.commandMsg = fmt.Sprintf("Couldn't encrypt that message: %v", err)
+		return nil
+	}
+	sealed, err := ws.SealCounted(sendKey, counter, body)
 	if err != nil {
 		m.commandMsg = fmt.Sprintf("Couldn't encrypt that message: %v", err)
 		return nil
@@ -197,7 +214,16 @@ func (m *Model) handleHandshake(contact chat.ContactKey, body []byte) tea.Cmd {
 	}
 
 	s := m.sessionFor(contact)
+	if s.epochs.Retired(ephemeral) {
+		// A key the contact has already moved on from: this frame is stale
+		// or a replay. Stepping back onto it would also step back onto a
+		// session whose messages an attacker may have recorded.
+		return nil
+	}
 	changed := !s.peerSeen || !sameKey(s.peerEphemeral, ephemeral)
+	if s.peerEphemeral != nil && !sameKey(s.peerEphemeral, ephemeral) {
+		s.epochs.Retire(s.peerEphemeral)
+	}
 	s.peerEphemeral = ephemeral
 	s.peerSeen = true
 
@@ -232,18 +258,28 @@ func (m *Model) handleSealed(contact chat.ContactKey, body []byte) tea.Cmd {
 		return nil
 	}
 
-	plaintext, err := ws.OpenMessage(s.key, body)
+	_, recvKey, err := m.directionKeys(contact, s)
 	if err != nil {
-		// Authentication failing means the bytes were sealed under a
-		// different key than the one in hand - in practice, the
-		// contact relaunched since we last derived (new ephemeral) or
-		// something tampered with the frame. Discarding our state
-		// makes the next handshake re-establish from scratch instead
-		// of wedging this thread on a key that no longer works.
-		s.key = nil
-		s.peerEphemeral = nil
-		s.peerSeen = false
-		m.commandMsg = fmt.Sprintf("Couldn't open a message from %s - resetting that handshake to try again.", m.chatContactLabel(contact))
+		m.commandMsg = fmt.Sprintf("Couldn't open a message from %s: %v", m.chatContactLabel(contact), err)
+		return nil
+	}
+	counter, plaintext, err := ws.OpenCounted(recvKey, body)
+	if err != nil {
+		// Authentication failing means the bytes were not sealed by this
+		// contact under this session - an injected, reflected or corrupted
+		// frame, or a message from a session we don't hold. The session
+		// is left exactly as it was: tearing it down on a failed open
+		// would let anyone who can inject a frame wedge the thread, since
+		// the contact has no reason to send their handshake again. If the
+		// contact really did relaunch, their handshake frame (which they
+		// send before their first message) re-establishes things.
+		m.commandMsg = fmt.Sprintf("Dropped a message from %s that didn't verify.", m.chatContactLabel(contact))
+		return nil
+	}
+	// Only now, after authentication, may the counter touch the window -
+	// otherwise forged frames could advance it and starve real traffic.
+	if !m.epochFor(s).Recv.Accept(counter) {
+		m.commandMsg = fmt.Sprintf("Ignored a repeated message from %s.", m.chatContactLabel(contact))
 		return nil
 	}
 
@@ -272,6 +308,33 @@ func (m *Model) flushPending(contact chat.ContactKey, s *chatSession) tea.Cmd {
 		}
 	}
 	return tea.Batch(cmds...)
+}
+
+// epochFor returns the counter state for the session key currently held
+// for this contact: the one built from this launch's ephemeral key and
+// the contact's latest. Callers have already established that both exist.
+func (m *Model) epochFor(s *chatSession) *ws.Epoch {
+	var local *[32]byte
+	if m.wsClient != nil && m.wsClient.Ephemeral != nil {
+		local = m.wsClient.Ephemeral.Public
+	}
+	return s.epochs.For(local, s.peerEphemeral)
+}
+
+// directionKeys splits the contact's session key into the key we seal
+// with and the key we open with. Separate keys per direction are what
+// stop a relay from reflecting our own message back at us as if the
+// contact had sent it: it would be sealed under our send key, which is
+// not the key we open with.
+func (m *Model) directionKeys(contact chat.ContactKey, s *chatSession) (send, recv *[32]byte, err error) {
+	if m.identity == nil {
+		return nil, nil, fmt.Errorf("no identity loaded")
+	}
+	remoteStatic, err := staticKeyOf(contact)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ws.DirectionalKeys(s.key, m.identity.BoxPublic, remoteStatic)
 }
 
 // deriveSessionKey computes this contact's session key from the four

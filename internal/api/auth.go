@@ -28,13 +28,16 @@ func (c *Client) RegisterChallenge(ctx context.Context, username string) (string
 // RegisterVerify is step two of registering a new username. signatureHex
 // must be computed over challenge's UTF-8 bytes exactly as received
 // from RegisterChallenge - see crypto.Identity.SignChallenge, which
-// does this correctly.
-func (c *Client) RegisterVerify(ctx context.Context, username, pubKeyHex, boxPubKeyHex, signatureHex string) (*TokenPair, error) {
+// does this correctly. boxKeySigHex is the identity key's signature
+// binding boxPubKeyHex to username (crypto.Identity.SignBoxKey): the
+// server checks it, and serves it so other clients can too.
+func (c *Client) RegisterVerify(ctx context.Context, username, pubKeyHex, boxPubKeyHex, boxKeySigHex, signatureHex string) (*TokenPair, error) {
 	var resp TokenPair
 	err := c.do(ctx, http.MethodPost, "/auth/register/verify", "", map[string]string{
 		"username":    username,
 		"pub_key":     pubKeyHex,
 		"box_pub_key": boxPubKeyHex,
+		"box_key_sig": boxKeySigHex,
 		"signature":   signatureHex,
 	}, &resp)
 	if err != nil {

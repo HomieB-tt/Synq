@@ -45,7 +45,7 @@ func TestChatResolveStoresTheUserIDForBothDirections(t *testing.T) {
 
 	next, cmd := m.handleChatResolveResult(chatResolveResultMsg{
 		username: "alice",
-		keys:     &api.PublicKeys{UserID: "user-uuid-1", Username: "alice", BoxPubKey: box},
+		keys:     signedKeys("user-uuid-1", "alice", box, newSigner(t)),
 	})
 	got := next.(Model)
 
@@ -148,7 +148,7 @@ func TestChatResolveWithoutUserIDOpensNothing(t *testing.T) {
 
 	next, _ := m.handleChatResolveResult(chatResolveResultMsg{
 		username: "alice",
-		keys:     &api.PublicKeys{Username: "alice", BoxPubKey: boxKeyHex(t)},
+		keys:     signedKeys("", "alice", boxKeyHex(t), newSigner(t)),
 	})
 	got := next.(Model)
 
@@ -160,5 +160,17 @@ func TestChatResolveWithoutUserIDOpensNothing(t *testing.T) {
 	}
 	if len(got.chatContacts) != 0 || len(got.chatContactIDs) != 0 {
 		t.Error("recorded metadata for a contact that can't be messaged")
+	}
+}
+
+// signedKeys is a lookup response whose box key carries a valid binding
+// signature from s.
+func signedKeys(userID, username, boxHex string, s signer) *api.PublicKeys {
+	return &api.PublicKeys{
+		UserID:    userID,
+		Username:  username,
+		PubKey:    s.hex(),
+		BoxPubKey: boxHex,
+		BoxKeySig: s.bind(username, boxHex),
 	}
 }

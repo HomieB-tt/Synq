@@ -11,9 +11,16 @@ import (
 // controls - synq-server relays them untouched (see envelope.go) - so
 // it carries a one-byte kind tag followed by that kind's body:
 //
-//	0x01 handshake | JSON {"v":1,"eph":"<base64 32-byte X25519 pub>"}
-//	0x02 sealed    | nacl/secretbox blob, exactly as SealMessage
-//	                       produced it (nonce || ciphertext)
+//	0x01 handshake | JSON {"v":2,"eph":"<base64 32-byte X25519 pub>"}
+//	0x03 sealed    | nacl/secretbox blob as SealCounted produced it
+//	                       (nonce || box(counter || message)), sealed under
+//	                       a per-direction key (DirectionalKeys)
+//
+// Kind 0x02 (and handshake version 1) belonged to the first version of
+// the protocol, which used one key for both directions and carried no
+// message counter, so a relay could replay or reflect messages. They are
+// refused, with a message that says so, rather than accepted: silently
+// downgrading would reopen exactly that hole.
 //
 // The tag exists because the server can't tell the two apart either
 // (it must not try) and the receiver otherwise couldn't: a sealed blob
@@ -40,14 +47,21 @@ const (
 	// public key (DESIGN.md §3).
 	PayloadKindHandshake PayloadKind = 0x01
 	// PayloadKindSealed carries an already-encrypted message body.
-	PayloadKindSealed PayloadKind = 0x02
+	PayloadKindSealed PayloadKind = 0x03
+
+	// payloadKindLegacySealed was the sealed-message kind before
+	// per-direction keys and message counters. Never written; refused on
+	// receipt with an explanatory error.
+	payloadKindLegacySealed PayloadKind = 0x02
 )
 
 // handshakeVersion is the only version this client writes or accepts.
 // Bumping it means the frame shape changed, so an older peer that
 // can't read the new one must be able to tell that apart from a
-// corrupt frame.
-const handshakeVersion = 1
+// corrupt frame. Version 2 introduced per-direction keys and message
+// counters (see DirectionalKeys and SealCounted); version 1 peers are
+// told to update, never silently interoperated with.
+const handshakeVersion = 2
 
 // handshakeFrame is the JSON body behind PayloadKindHandshake.
 type handshakeFrame struct {
@@ -95,6 +109,8 @@ func DecodePayload(payload []byte) (PayloadKind, []byte, error) {
 	}
 	kind := PayloadKind(payload[0])
 	switch kind {
+	case payloadKindLegacySealed:
+		return 0, nil, errors.New("ws: payload is from an older Synq version without replay protection - ask them to update")
 	case PayloadKindHandshake, PayloadKindSealed:
 		if len(payload) == 1 {
 			return 0, nil, fmt.Errorf("ws: payload kind %#x has no body", byte(kind))
@@ -116,7 +132,11 @@ func ParseHandshake(body []byte) (*[32]byte, error) {
 		return nil, fmt.Errorf("ws: parse handshake: %w", err)
 	}
 	if f.Version != handshakeVersion {
-		return nil, fmt.Errorf("ws: unsupported handshake version %d (want %d)", f.Version, handshakeVersion)
+		hint := ""
+		if f.Version < handshakeVersion {
+			hint = " - the sender is running an older Synq and needs to update"
+		}
+		return nil, fmt.Errorf("ws: unsupported handshake version %d (want %d)%s", f.Version, handshakeVersion, hint)
 	}
 	raw, err := base64.StdEncoding.DecodeString(f.Ephemeral)
 	if err != nil {

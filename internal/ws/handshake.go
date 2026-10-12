@@ -44,7 +44,11 @@ func NewEphemeralKeypair() (*EphemeralKeypair, error) {
 // HKDF Synq's crypto surface might ever add. There's only this one
 // today (TECH_STACK.md), but tying the derivation to a fixed context
 // string costs nothing and doesn't depend on that staying true.
-var sessionKeyInfo = []byte("synq-session-v1")
+//
+// "v2" matches handshakeVersion 2 (see payload.go): the derivation itself
+// is unchanged from v1, but the label is bumped so a root key can never
+// coincide with one from the old protocol.
+var sessionKeyInfo = []byte("synq-session-v2")
 
 // DeriveSessionKey computes the shared per-session message-encryption
 // key for a contact, per the X3DH-lite construction in DESIGN.md
@@ -115,4 +119,66 @@ func x25519(priv, pub *[32]byte) (*[32]byte, error) {
 	var result [32]byte
 	copy(result[:], out)
 	return &result, nil
+}
+
+// directionInfoPrefix domain-separates the per-direction subkeys from the
+// root key's own derivation above.
+const directionInfoPrefix = "synq-session-v2/direction/"
+
+// DirectionalKeys splits a root session key (DeriveSessionKey's output)
+// into one key per direction of travel: send, to seal what this client
+// transmits, and recv, to open what the contact transmits.
+//
+// Using one shared key for both directions - as the root key alone would
+// - lets a relay reflect a message back at its own sender and have it
+// authenticate, because each party can open anything sealed under the
+// key the other party seals with. With separate keys, a reflected
+// message was sealed under our send key and we only ever try our recv
+// key, so it fails authentication.
+//
+// Both parties must agree which key is which without negotiating, so the
+// directions are named by a canonical order both already know: whichever
+// static public key sorts first (byte-wise) is "low", the other "high".
+// The key for the low-to-high direction is therefore the same value no
+// matter which party computes it - the sender's send key equals the
+// receiver's recv key. Each subkey is also bound to both static keys, so
+// it can't be carried over to a different pair of contacts.
+func DirectionalKeys(root, localStatic, remoteStatic *[32]byte) (send, recv *[32]byte, err error) {
+	if root == nil || localStatic == nil || remoteStatic == nil {
+		return nil, nil, errors.New("ws: DirectionalKeys: nil key material")
+	}
+
+	low, high := localStatic, remoteStatic
+	localIsLow := bytes.Compare(localStatic[:], remoteStatic[:]) <= 0
+	if !localIsLow {
+		low, high = remoteStatic, localStatic
+	}
+
+	derive := func(label string) (*[32]byte, error) {
+		info := make([]byte, 0, len(directionInfoPrefix)+len(label)+64)
+		info = append(info, directionInfoPrefix...)
+		info = append(info, label...)
+		info = append(info, low[:]...)
+		info = append(info, high[:]...)
+
+		var key [32]byte
+		if _, err := io.ReadFull(hkdf.Expand(sha256.New, root[:], info), key[:]); err != nil {
+			return nil, fmt.Errorf("ws: DirectionalKeys: %w", err)
+		}
+		return &key, nil
+	}
+
+	lowToHigh, err := derive("low-to-high")
+	if err != nil {
+		return nil, nil, err
+	}
+	highToLow, err := derive("high-to-low")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if localIsLow {
+		return lowToHigh, highToLow, nil
+	}
+	return highToLow, lowToHigh, nil
 }

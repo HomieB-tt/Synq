@@ -6,7 +6,74 @@ This repository contains the Go client. The companion backend, [`synq-server`](h
 
 ## Downloads
 
-Prebuilt binaries for Linux, macOS, and Windows are available from the [GitHub Releases](https://github.com/HomieB-tt/Synq/releases) page. Download the archive for your operating system and architecture, extract it, and run `synq` (or `synq.exe` on Windows). Each release includes a `checksums.txt` file for verifying downloads.
+Prebuilt binaries for Linux, macOS, and Windows are available from the [GitHub Releases](https://github.com/HomieB-tt/Synq/releases) page. Choose the archive matching your operating system and processor architecture (`amd64` for most Intel/AMD computers, `arm64` for Apple Silicon and ARM computers). Each release includes a `checksums.txt` file for verifying downloads.
+
+### Linux (Debian, Fedora, Arch, and others)
+
+Extract the `.tar.gz` archive, then install the binary into `/usr/local/bin`, which is normally already on your `PATH`:
+
+```sh
+tar -xzf synq_VERSION_linux_ARCH.tar.gz
+sudo install -m 755 synq /usr/local/bin/synq
+```
+
+Replace `VERSION` and `ARCH` with the values in the downloaded archive's filename. Alternatively, install it just for your user:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 755 synq "$HOME/.local/bin/synq"
+```
+
+If `~/.local/bin` is not already on your `PATH`, add this line to your shell startup file (for example, `~/.bashrc` or `~/.zshrc`) and open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### macOS
+
+Signed and notarized releases provide a `.zip` archive. Extract it and install Synq into your user-local bin directory:
+
+```sh
+unzip synq_VERSION_darwin_ARCH.zip
+mkdir -p "$HOME/.local/bin"
+install -m 755 synq "$HOME/.local/bin/synq"
+```
+
+Older, unsigned releases provide a `.tar.gz` archive instead; extract those with `tar -xzf synq_VERSION_darwin_ARCH.tar.gz`.
+
+The default macOS shell is zsh. If `~/.local/bin` is not already on your `PATH`, add the following line to `~/.zshrc`, then open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+macOS releases are signed and notarized when the repository's Apple signing secrets are configured; otherwise the release workflow publishes the unsigned archives. Older releases published before signing was configured remain unsigned.
+
+### Windows
+
+Extract the `.zip` archive to a folder such as `%LOCALAPPDATA%\Programs\Synq`. To run `synq` from any terminal, add that folder (the one containing `synq.exe`) to your user `Path`:
+
+1. Open **Settings**, search for **Environment Variables**, and choose **Edit environment variables for your account**.
+2. Select **Path** under user variables, choose **Edit**, then **New**.
+3. Enter the folder containing `synq.exe`, save the changes, and open a new terminal.
+
+You can then run `synq.exe` from PowerShell or Command Prompt.
+
+### macOS release signing (maintainers)
+
+To enable signing and notarization for future tagged releases, configure these repository Actions secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` certificate |
+| `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` certificate |
+| `APPLE_SIGNING_IDENTITY` | Full Developer ID Application signing identity |
+| `APPLE_API_KEY` | Base64-encoded App Store Connect API `.p8` key |
+| `APPLE_API_KEY_ID` | App Store Connect API key ID |
+| `APPLE_API_ISSUER_ID` | App Store Connect API issuer ID |
+
+The certificate and App Store Connect API key must belong to an Apple Developer team enrolled in the Apple Developer Program. The release workflow signs each macOS binary, submits its archive to Apple's notary service, and publishes the notarized archives. Releases remain drafts until the release and notarization jobs complete. If none of the secrets are set, notarization is skipped and the unsigned macOS archives are published; if only some are set or notarization fails, the release remains a draft.
 
 ## What it does
 

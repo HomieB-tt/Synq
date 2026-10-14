@@ -30,8 +30,7 @@ import (
 // into memory. The largest legitimate JSON response (a full page of
 // feed posts) is around a megabyte; a server sending more than this is
 // misbehaving, and an unbounded read would let it exhaust the client's
-// memory. File transfer, when added, must stream rather than use this
-// path.
+// memory. File transfer streams instead (see attachments.go).
 const maxResponseBytes = 8 << 20
 
 // Client talks to one synq-server deployment, identified by BaseURL
@@ -41,6 +40,12 @@ const maxResponseBytes = 8 << 20
 type Client struct {
 	BaseURL string
 	http    *http.Client
+
+	// stream is for file transfer: no overall timeout, because a 100 MB
+	// body on a slow link legitimately takes longer than any fixed
+	// limit. Callers bound it with the request context instead, and
+	// the transport still enforces its own dial and header timeouts.
+	stream *http.Client
 }
 
 // NewClient builds a Client for the given base URL. A trailing slash,
@@ -50,6 +55,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{Timeout: 15 * time.Second},
+		stream:  &http.Client{},
 	}
 }
 

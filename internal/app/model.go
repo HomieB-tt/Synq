@@ -23,6 +23,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/github"
+	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
 	"github.com/HomieB-tt/synq/internal/ws"
 )
@@ -309,6 +310,21 @@ type Model struct {
 	themePickerIndex int
 	themePickerPrev  styles.Theme // theme active right before the picker opened; restored on Esc
 
+	// File transfer (DESIGN.md section 10; see files.go). fileSession is
+	// the server-side session attachments hang off, empty until one is
+	// created. files lists the offers received this launch; fileCache is
+	// the private directory they are decrypted into, created on first use
+	// and deleted on quit. saveDir is where `s` copies a kept file to.
+	// fileOpen is the "open with default app" hook, nil meaning the real
+	// one - a field so tests never launch a program.
+	fileSession     string
+	fileCache       *transfer.Cache
+	files           []*fileEntry
+	filePickerOpen  bool
+	filePickerIndex int
+	saveDir         string
+	fileOpen        transfer.Opener
+
 	// helpOpen is true while the ? / `:help` overlay is showing (see
 	// help.go). Like the theme picker it captures every key and
 	// closes on the next press.
@@ -484,7 +500,10 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 		bootEnabled = false
 	}
 
+	saveDir, _ := store.LoadPreference(db.PrefSaveDir)
+
 	return Model{
+		saveDir:        saveDir,
 		identity:       id,
 		store:          store,
 		theme:          theme,
@@ -532,6 +551,7 @@ func (m Model) Init() tea.Cmd {
 	if m.apiClient != nil && m.accessToken != "" {
 		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
 		cmds = append(cmds, uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username))
+		cmds = append(cmds, m.startFileSession())
 	}
 	return tea.Batch(cmds...)
 }
@@ -569,6 +589,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatResolveResultMsg:
 		return m.handleChatResolveResult(msg)
+
+	case fileSessionMsg:
+		return m.handleFileSession(msg)
+
+	case fileHeartbeatTickMsg:
+		return m.handleFileHeartbeatTick(msg)
+
+	case fileHeartbeatResultMsg:
+		return m.handleFileHeartbeatResult(msg)
+
+	case fileSendResultMsg:
+		return m.handleFileSendResult(msg)
+
+	case fileReceiveResultMsg:
+		return m.handleFileReceiveResult(msg)
+
+	case fileViewResultMsg:
+		return m.handleFileViewResult(msg)
+
+	case fileSaveResultMsg:
+		return m.handleFileSaveResult(msg)
 
 	case wsConnectErrorMsg:
 		// Nothing the user can do about a malformed SYNQ_SERVER_URL
@@ -668,6 +709,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.themePickerOpen {
 			return m.updateThemePicker(msg)
+		}
+		if m.filePickerOpen {
+			return m.updateFilePicker(msg)
 		}
 		if m.commandMode {
 			return m.updateCommandMode(msg)
@@ -870,7 +914,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.wsClient.Close()
 		}
 		m.chatStore.Purge()
-		return m, tea.Quit
+		return m, m.quitCmd()
 
 	case "1":
 		m.activeTab = tabFeed
@@ -918,7 +962,7 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.wsClient.Close()
 			}
 			m.chatStore.Purge()
-			return m, tea.Quit
+			return m, m.quitCmd()
 		}
 		return m, cmd
 
@@ -954,6 +998,15 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// whatever was showing before, not all the way out of Profile.
 		m.chatActive = ""
 		m.chatInput = ""
+		return m, nil
+
+	case "ctrl+p":
+		// The palette is otherwise unreachable here - ":" types into
+		// the message - and :send only makes sense inside a thread.
+		// The thread stays open underneath; the draft is kept.
+		m.commandMode = true
+		m.commandInput = ""
+		m.commandMsg = ""
 		return m, nil
 
 	case "enter":
@@ -1173,6 +1226,16 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "Log in first - :register <username> if you haven't registered, or :login if you have.", false, nil
 		}
 		return fmt.Sprintf("Looking up %s...", fields[1]), false, resolveChatContactCmd(m.apiClient, m.accessToken, fields[1])
+
+	case "send":
+		result, sendCmd := m.sendFileCmd(strings.TrimSpace(strings.TrimPrefix(cmd, "send")))
+		return result, false, sendCmd
+
+	case "files":
+		return m.openFilePicker(), false, nil
+
+	case "savedir":
+		return m.savedirCommand(strings.TrimSpace(strings.TrimPrefix(cmd, "savedir"))), false, nil
 
 	case "register":
 		if m.identity == nil {
@@ -1491,6 +1554,9 @@ func (m Model) renderContent() string {
 	if m.themePickerOpen {
 		return placeWithBackground(m.renderThemePicker(), width, height, m.theme.Palette.Background)
 	}
+	if m.filePickerOpen {
+		return placeWithBackground(m.renderFilePicker(), width, height, m.theme.Palette.Background)
+	}
 	if m.helpOpen {
 		return placeWithBackground(m.renderHelp(), width, height, m.theme.Palette.Background)
 	}
@@ -1543,7 +1609,7 @@ func (m Model) renderChat() string {
 		for _, contact := range threads {
 			msgs := m.chatStore.Messages(contact)
 			last := msgs[len(msgs)-1]
-			fmt.Fprintf(&b, "  %s  (%d) %s\n", m.chatContactLabel(contact), len(msgs), truncateRunes(string(last.Body), 40))
+			fmt.Fprintf(&b, "  %s  (%d) %s\n", m.chatContactLabel(contact), len(msgs), truncateRunes(sanitizeForTerminal(string(last.Body)), 40))
 		}
 		b.WriteString("\nOpen one with :chat <username>.")
 		return b.String()
@@ -1577,7 +1643,7 @@ func (m Model) renderChat() string {
 		if msg.Outgoing {
 			who = "you"
 		}
-		fmt.Fprintf(&b, "[%s] %s: %s\n", msg.At.Format("15:04:05"), who, msg.Body)
+		fmt.Fprintf(&b, "[%s] %s: %s\n", msg.At.Format("15:04:05"), who, sanitizeForTerminal(string(msg.Body)))
 	}
 
 	fmt.Fprintf(&b, "\n> %s\n", m.chatInput)
@@ -1591,16 +1657,16 @@ func (m Model) renderChat() string {
 // when the contact's pinned key has changed - not send at all.
 func (m Model) composeHint() string {
 	if m.keyBlockReason(m.chatActive) != "" {
-		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · esc back to chat list",
+		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · ctrl+p commands · esc back to chat list",
 			m.chatContactLabel(m.chatActive))
 	}
 	switch {
 	case m.wsClient == nil:
-		return "enter send (stays local while disconnected) · esc back to chat list"
+		return "enter send (stays local while disconnected) · ctrl+p commands · esc back to chat list"
 	case !m.hasSessionKey(m.chatActive):
-		return "enter send (queued until the handshake completes) · esc back to chat list"
+		return "enter send (queued until the handshake completes) · ctrl+p commands · esc back to chat list"
 	default:
-		return "enter send · esc back to chat list"
+		return "enter send · ctrl+p commands · esc back to chat list"
 	}
 }
 

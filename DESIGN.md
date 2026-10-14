@@ -112,6 +112,28 @@ This document captures the architectural decisions made for the `synq` client du
 
 **How this connects to the Feed's anonymization rule (synq-server-DESIGN.md section 5):** the server decides whether to send real usernames or a flat `"node"` placeholder based on whether the request carries a valid, authenticated session — not on whether the client happens to have a local identity. A guest who has never registered/logged in and someone who has generated a local identity but never connected to a server look identical to the server. The client itself does no redaction; it only ever displays whatever `author` field the server actually sent.
 
+## 11. File transfer
+
+Files move over synq-server's HTTP Claim Check endpoints (never the WebSocket), up to 100 MB, and only between active nodes. The server stores ciphertext and nothing else; everything that identifies or opens a file stays between the two clients.
+
+**Encryption.** Each file gets a fresh random 256-bit key, used for that file only. The file is sealed in 64 KiB chunks with AES-256-GCM (`internal/filecrypt`). A chunk's nonce is its index, and its authenticated data marks whether it is the last chunk, so reordering, duplicating, truncating (even at a chunk boundary) or extending the ciphertext all fail authentication. The sender writes the ciphertext to a scratch file first, because the offer must commit to its exact size and SHA-256 before the upload begins.
+
+**The key and filename never touch the server.** After the upload the sender sends an *offer* - attachment id, filename, size, ciphertext hash and the file key - as an ordinary sealed chat message, so it gets the same forward secrecy, sender authentication and replay protection as text (a leading NUL byte, which can't be typed, marks the body as an offer). The server's own metadata is just the size, the hash and a non-secret algorithm label. The consequence is that an offer only reaches a contact who is online and past the handshake, exactly like a chat message: the server keeps no queue, and nothing of a file outlives the sender's session (quitting terminates it, which deletes the blobs).
+
+**Receiving.** An offer is listed in `:files`; nothing is downloaded until the user chooses. The client then claims, downloads, and checks, in order: the size matches what the offer implies, the SHA-256 matches the sender's committed hash (carried in the encrypted offer, so the server could not have chosen it), every chunk authenticates, and the decrypted length matches. Only then does it tell the server the download is complete - that report asserts the file is authenticated, so it is never sent earlier - and the plaintext appears under its real name in a private (0700) cache directory. Any failure cancels the download and deletes what was written.
+
+**View, save, ignore.**
+- *View* opens the cached file in the operating system's default application for its type. That hands plaintext to another program, which is what viewing is, so it is refused for anything an OS would run (executables, scripts, shortcuts, macro documents, installers, and files with no extension); those can only be saved. The opener is started without a shell, with the path as one argument.
+- *Save* copies the file to the directory set with `:savedir`, never overwriting (`name (1).ext`), created 0600 so it is never executable. Nothing is saved anywhere until the user asks.
+- *Ignore* deletes the decrypted copy and tells the server.
+- Choosing view or save on a file that hasn't been downloaded downloads it first and then does it.
+
+The cache is wiped at startup and deleted on quit and on `:logout`, so a file that was viewed but not saved does not outlive the session - save is what keeps it (section 4).
+
+**Untrusted input.** A contact controls the filename, size and every other field of an offer. Filenames are reduced to a bare, bounded, platform-safe name (no directory parts, control or bidirectional-override characters, or Windows reserved names); ids are checked before they become a path; sizes are range-checked. Chat message text is stripped of terminal control characters before drawing, so a contact can't send escape sequences through the chat view.
+
+**Server session.** Attachments hang off a server-side session with a 60-second lease. The client creates one when it has a token, renews it every 20 seconds, starts a new one if the server reports the old one gone, and terminates it on quit.
+
 ## Summary table
 
 | Area | Decision |
@@ -122,6 +144,7 @@ This document captures the architectural decisions made for the `synq` client du
 | Ephemeral cache | Thread history persists across tab switches within a session; quitting Synq purges everything unsaved; explicit save for attachments |
 | Multi-device | Single-device only, documented limitation, no sync |
 | Piped input | ANSI/control sequences stripped before storage or rendering |
+| File transfer | Per-file key, chunked AES-256-GCM; key and name travel in the encrypted chat channel, not to the server; view (default app, never for runnable types) or save (to `:savedir`) after verification |
 | Theming | Explicit theme choice or one-time `RequestBackgroundColor`, no auto-detection |
 | `$EDITOR` | Falls back to built-in input if unset; any editor error/abort discards the draft |
 | GitHub verification | OAuth Device Flow, optional, separate from registration |

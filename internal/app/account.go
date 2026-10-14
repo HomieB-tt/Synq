@@ -99,7 +99,7 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 	// Now that there's an access token, start the WS connection the
 	// same way Init does at startup - this is the only other place
 	// that can transition "no token" into "should be connected".
-	return m, startWSCmd(m.apiClient.BaseURL, m.accessToken)
+	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession())
 }
 
 // --- :login (manual) ---
@@ -161,6 +161,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(
 		startWSCmd(m.apiClient.BaseURL, m.accessToken),
 		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
+		m.startFileSession(),
 	)
 }
 
@@ -224,6 +225,17 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	if m.wsClient != nil {
 		m.wsClient.Close()
 		m.wsClient = nil
+	}
+	// LogoutAll revoked the token the transfer session was using, so it
+	// can't be terminated politely; the server expires it on its own.
+	// What this launch received is wiped now rather than left lying
+	// around for whoever logs in next.
+	m.fileSession = ""
+	m.files = nil
+	m.filePickerOpen = false
+	if m.fileCache != nil {
+		_ = m.fileCache.Close()
+		m.fileCache = nil
 	}
 
 	if msg.err != nil {

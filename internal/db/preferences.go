@@ -43,6 +43,12 @@ const PrefDisplayName = "display_name"
 // default of on.
 const PrefBoot = "boot"
 
+// PrefSaveDir is the preferences key under which the directory kept
+// files are saved to is stored (internal/app's `:savedir` command).
+// Unset means the user hasn't chosen one yet, and saving a received file
+// asks them to rather than guessing a location.
+const PrefSaveDir = "save_dir"
+
 // PrefUsername is the preferences key under which the username this
 // identity has registered with synq-server is stored, once
 // registration (`:register <username>`, see internal/app) succeeds.

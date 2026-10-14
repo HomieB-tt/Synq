@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/HomieB-tt/synq/internal/chat"
+	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ws"
 )
 
@@ -280,6 +281,14 @@ func (m *Model) handleSealed(contact chat.ContactKey, body []byte) tea.Cmd {
 	// otherwise forged frames could advance it and starve real traffic.
 	if !m.epochFor(s).Recv.Accept(counter) {
 		m.commandMsg = fmt.Sprintf("Ignored a repeated message from %s.", m.chatContactLabel(contact))
+		return nil
+	}
+
+	if transfer.IsOffer(plaintext) {
+		// A file offer rides the same authenticated channel as text, so
+		// it is known to come from this contact. It is listed, not
+		// fetched: nothing is downloaded until the user chooses.
+		m.receiveOffer(contact, plaintext)
 		return nil
 	}
 

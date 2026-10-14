@@ -79,7 +79,7 @@ The certificate and App Store Connect API key must belong to an Apple Developer 
 
 Synq gives you four core views, all reachable without touching a mouse:
 
-- **Feed** — a global stream of posts tagged `[PROJECT]`, `[HIRING]`, or `[GENERAL]`. Pipe command output straight into a post (`cat error.log | synq post`), or open your `$EDITOR` mid-draft with `Ctrl+O`.
+- **Feed** — a global stream of posts tagged `[PROJECT]`, `[HIRING]`, or `[GENERAL]`. Write posts in the TUI (`p` or `:post`) and open your `$EDITOR` mid-draft with `Ctrl+O`. *(Piping command output straight into a post, `cat error.log | synq post`, is designed but not built yet.)*
 - **Nodes** — your developer network. Connections move through `PENDING`, `ACTIVE`, and `BLOCKED` states.
 - **Chat** — ephemeral, end-to-end encrypted direct messages. The server relays bytes; it never sees plaintext.
 - **Profile** — your identity, including a local display name (`:name`, see below), GitHub verification status (`[✓ GitHub: @username]`) and the active local Git repository, shown for context as you work.
@@ -119,7 +119,8 @@ Requires Go 1.23+.
 | `Tab` / `Shift+Tab` | Move focus between panes |
 | `:` or `Ctrl+P` | Open command palette |
 | `?` | Open the help panel (keys + commands); any key closes it |
-| `Ctrl+O` | Open `$EDITOR` while composing a post |
+| `Ctrl+O` | Open `$EDITOR` while composing a post or comment |
+| `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
 | `q` / `Ctrl+C` | Quit |
 
 ## Command palette
@@ -133,6 +134,8 @@ Requires Go 1.23+.
 | `:verify <username>` | Compare your identity's fingerprint against the key pinned for that username (`DESIGN.md` section 2), for out-of-band verification. If a key change is pending, it compares against the **new**, not-yet-accepted key - the one you're about to trust. Requires having looked the username up at least once (`:chat` them first). |
 | `:verify <hex-pubkey>` | Same fingerprint, computed against a raw hex-encoded public key instead - for a key someone handed you directly, with no lookup involved. |
 | `:accept <username>` | Trust a contact whose public key **changed** since you pinned it (the hard warning of `DESIGN.md` section 2). Until you do, sending to them is blocked; compare fingerprints with `:verify` first if you want to check out-of-band. |
+| `:post [project\|hiring\|general]` | Write a Feed post (also `p` on the Feed tab). `Tab` switches between title and content, `Ctrl+G` changes the category, `Ctrl+O` edits the content in `$EDITOR`, `Ctrl+S` sends, `Esc` discards. Title up to 120 characters, content up to 10,000. Needs a login. |
+| `:report [reason]` | Report the post you have open (Feed tab, `Enter`). |
 | `:node <username>` | Send a node request to someone by their exact username (there's no user search - they have to tell you). Once they accept, you can `:chat` and `:send` to each other. |
 | `:nodes` | Open the Nodes tab and refresh it. Also `r` while on that tab. Shows requests waiting for you, your active nodes, and requests you've sent. |
 | `:accept <username>` | Accept a node request from that user. (The same command also trusts a contact's changed key - see below.) |

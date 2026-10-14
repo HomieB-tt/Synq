@@ -22,7 +22,8 @@ var helpKeys = []helpEntry{
 	{"Tab / Shift+Tab", "cycle tabs"},
 	{": or Ctrl+P", "command palette"},
 	{"?", "this help"},
-	{"r (Nodes tab)", "refresh nodes"},
+	{"Feed: ↑/↓ enter p", "select, open, write a post"},
+	{"r (Feed/Nodes)", "refresh"},
 	{"q / Ctrl+C", "quit"},
 }
 
@@ -31,6 +32,8 @@ var helpKeys = []helpEntry{
 // an unlisted command is invisible, and a listed-but-removed one shows
 // up in review as a dead row.
 var helpCommands = []helpEntry{
+	{":post [category]", "write a Feed post (project|hiring|general)"},
+	{":report [reason]", "report the open Feed post"},
 	{":node <user>", "send a node request (exact username)"},
 	{":nodes", "refresh the Nodes tab"},
 	{":accept <user>", "accept a node request or a changed key"},

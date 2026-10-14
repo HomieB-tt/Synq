@@ -332,6 +332,24 @@ type Model struct {
 	nodesLoaded bool
 	nodesErr    string
 
+	// Feed tab (see feed.go). feedPosts is what's loaded so far, newest
+	// first, with feedIndex the selection; feedOpen is true while one
+	// post and its comments are showing. composeOpen/compose are the
+	// modal composer for posts and comments, and deleteArmed holds the
+	// id of a post whose delete has been asked for once.
+	feedPosts          []api.Post
+	feedLoaded         bool
+	feedErr            string
+	feedMore           bool
+	feedIndex          int
+	feedOpen           bool
+	feedComments       []api.Comment
+	feedCommentsLoaded bool
+	feedCommentsErr    string
+	deleteArmed        string
+	composeOpen        bool
+	compose            composeState
+
 	// helpOpen is true while the ? / `:help` overlay is showing (see
 	// help.go). Like the theme picker it captures every key and
 	// closes on the next press.
@@ -568,6 +586,10 @@ func (m Model) Init() tea.Cmd {
 	if m.booting {
 		cmds = append(cmds, bootTick())
 	}
+	if m.apiClient != nil {
+		// Reading the Feed needs no login.
+		cmds = append(cmds, m.fetchFeedCmd(0))
+	}
 	if m.apiClient != nil && m.accessToken != "" {
 		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
 		cmds = append(cmds, uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username))
@@ -610,6 +632,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatResolveResultMsg:
 		return m.handleChatResolveResult(msg)
+
+	case feedLoadedMsg:
+		return m.handleFeedLoaded(msg)
+
+	case commentsLoadedMsg:
+		return m.handleCommentsLoaded(msg)
+
+	case feedActionMsg:
+		return m.handleFeedAction(msg)
+
+	case editorDoneMsg:
+		return m.handleEditorDone(msg)
 
 	case nodesLoadedMsg:
 		return m.handleNodesLoaded(msg)
@@ -733,6 +767,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// reference material, not a mode with its own key map.
 			m.helpOpen = false
 			return m, nil
+		}
+		if m.composeOpen {
+			return m.updateCompose(msg)
 		}
 		if m.themePickerOpen {
 			return m.updateThemePicker(msg)
@@ -933,6 +970,14 @@ func (m Model) handleBackgroundColor(msg tea.BackgroundColorMsg) Model {
 
 // updateNormalMode handles keys when the command palette is closed.
 func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.activeTab == tabFeed {
+		next, cmd, handled := m.updateFeedKeys(msg)
+		if handled {
+			return next, cmd
+		}
+		m = next.(Model)
+	}
+
 	// The thread list is the one normal-mode screen with a selection to
 	// move. These keys are only claimed there - j/k/enter mean nothing
 	// anywhere else, and an open thread never reaches this function
@@ -1322,6 +1367,17 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		result, blockCmd := m.blockNode(fields[1:])
 		return result, false, blockCmd
 
+	case "post":
+		cat := ""
+		if len(fields) > 1 {
+			cat = fields[1]
+		}
+		return m.startPost(cat), false, nil
+
+	case "report":
+		result, reportCmd := m.reportOpenPost(strings.TrimSpace(strings.TrimPrefix(cmd, "report")))
+		return result, false, reportCmd
+
 	case "send":
 		result, sendCmd := m.sendFileCmd(strings.TrimSpace(strings.TrimPrefix(cmd, "send")))
 		return result, false, sendCmd
@@ -1657,12 +1713,16 @@ func (m Model) renderContent() string {
 	}
 
 	var body string
+	if m.composeOpen {
+		return m.theme.Border.
+			Width(width-2).
+			Height(height).
+			Padding(1, 2).
+			Render(m.renderCompose())
+	}
 	switch m.activeTab {
 	case tabFeed:
-		body = "Feed is empty for now.\n\nPost with the CLI: cat file | synq post"
-		if m.identity == nil {
-			body += "\n\nYou're browsing as a guest - post authors show as \"node\" until you create an identity."
-		}
+		body = m.renderFeed()
 	case tabNodes:
 		body = m.renderNodes()
 	case tabChat:

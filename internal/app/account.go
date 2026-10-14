@@ -99,7 +99,7 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 	// Now that there's an access token, start the WS connection the
 	// same way Init does at startup - this is the only other place
 	// that can transition "no token" into "should be connected".
-	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd())
+	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd(), m.fetchFeedCmd(0))
 }
 
 // --- :login (manual) ---
@@ -163,6 +163,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
 		m.startFileSession(),
 		m.fetchNodesCmd(),
+		m.fetchFeedCmd(0),
 	)
 }
 
@@ -242,12 +243,20 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 		m.fileCache = nil
 	}
 
+	// Authors go back to "node" for a guest, and a half-written draft
+	// shouldn't outlive the login that was going to send it.
+	m.composeOpen = false
+	m.compose = composeState{}
+	m.feedPosts, m.feedLoaded, m.feedOpen = nil, false, false
+	m.feedComments, m.feedCommentsLoaded = nil, false
+	reload := m.fetchFeedCmd(0)
+
 	if msg.err != nil {
 		m.commandMsg = fmt.Sprintf("Logged out locally, but the server call failed: %v", msg.err)
-		return m, nil
+		return m, reload
 	}
 	m.commandMsg = "Logged out."
-	return m, nil
+	return m, reload
 }
 
 // --- automatic re-auth (mid-session token expiry) ---

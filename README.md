@@ -4,6 +4,10 @@ Synq is a terminal-native, keyboard-driven client for the Synq developer network
 
 This repository contains the Go client. The companion backend, [`synq-server`](https://github.com/HomieB-tt/synq-server), is a private repository — the link is provided for context and will only resolve for those with access.
 
+## Downloads
+
+Prebuilt binaries for Linux, macOS, and Windows are available from the [GitHub Releases](https://github.com/HomieB-tt/Synq/releases) page. Download the archive for your operating system and architecture, extract it, and run `synq` (or `synq.exe` on Windows). Each release includes a `checksums.txt` file for verifying downloads.
+
 ## What it does
 
 Synq gives you four core views, all reachable without touching a mouse:

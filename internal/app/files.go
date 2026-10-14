@@ -287,7 +287,7 @@ func (m Model) handleFileSendResult(msg fileSendResultMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	m.chatStore.Append(msg.contact, chat.Message{
-		Body:     []byte(fmt.Sprintf("📎 sent %s (%s)", msg.sent.Name, humanSize(msg.sent.Size))),
+		Body:     fmt.Appendf(nil, "📎 sent %s (%s)", msg.sent.Name, humanSize(msg.sent.Size)),
 		At:       time.Now(),
 		Outgoing: true,
 	})
@@ -318,9 +318,10 @@ func (m *Model) receiveOffer(contact chat.ContactKey, body []byte) {
 	}
 	m.files = append(m.files, &fileEntry{contact: contact, from: label, offer: offer, key: key})
 	m.chatStore.Append(contact, chat.Message{
-		Body: []byte(fmt.Sprintf("📎 offered %s (%s) - :files to view or save it", offer.Name, humanSize(offer.Size))),
+		Body: fmt.Appendf(nil, "📎 offered %s (%s) - :files to view or save it", offer.Name, humanSize(offer.Size)),
 		At:   time.Now(),
 	})
+	m.noteIncoming(contact)
 	m.commandMsg = fmt.Sprintf("%s offered you %s (%s) - :files", label, offer.Name, humanSize(offer.Size))
 }
 

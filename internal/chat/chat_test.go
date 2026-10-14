@@ -133,3 +133,66 @@ func TestStoreConcurrentAppendAndRead(t *testing.T) {
 		t.Fatalf("got %d total messages across all threads, want %d", total, want)
 	}
 }
+
+func TestStoreLen(t *testing.T) {
+	s := NewStore()
+	if got := s.Len("alice"); got != 0 {
+		t.Fatalf("Len of an unknown thread = %d, want 0", got)
+	}
+	s.Append("alice", Message{Body: []byte("one")})
+	s.Append("alice", Message{Body: []byte("two")})
+	s.Append("bob", Message{Body: []byte("x")})
+	if got := s.Len("alice"); got != 2 {
+		t.Errorf("Len(alice) = %d, want 2", got)
+	}
+}
+
+func TestStoreSliceClampsAndOrders(t *testing.T) {
+	s := NewStore()
+	for _, b := range []string{"a", "b", "c", "d", "e"} {
+		s.Append("alice", Message{Body: []byte(b)})
+	}
+
+	bodies := func(ms []Message) string {
+		out := ""
+		for _, m := range ms {
+			out += string(m.Body)
+		}
+		return out
+	}
+
+	cases := []struct {
+		name     string
+		from, to int
+		want     string
+	}{
+		{"middle", 1, 4, "bcd"},
+		{"whole thread", 0, 5, "abcde"},
+		{"to past the end is clamped", 3, 99, "de"},
+		{"from before the start is clamped", -4, 2, "ab"},
+		{"empty range", 2, 2, ""},
+		{"inverted range", 4, 1, ""},
+	}
+	for _, c := range cases {
+		if got := bodies(s.Slice("alice", c.from, c.to)); got != c.want {
+			t.Errorf("%s: Slice(%d, %d) = %q, want %q", c.name, c.from, c.to, got, c.want)
+		}
+	}
+	if got := s.Slice("nobody", 0, 3); got != nil {
+		t.Errorf("Slice of an unknown thread = %v, want nil", got)
+	}
+}
+
+// Slice, like Messages, must hand back copies: a caller scribbling on a
+// returned body (or Purge zeroing the real one) must not reach the other.
+func TestStoreSliceReturnsACopy(t *testing.T) {
+	s := NewStore()
+	s.Append("alice", Message{Body: []byte("secret")})
+
+	got := s.Slice("alice", 0, 1)
+	got[0].Body[0] = 'X'
+
+	if again := s.Slice("alice", 0, 1); string(again[0].Body) != "secret" {
+		t.Errorf("mutating a Slice result changed the store: %q", again[0].Body)
+	}
+}

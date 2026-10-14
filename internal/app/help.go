@@ -22,6 +22,7 @@ var helpKeys = []helpEntry{
 	{"Tab / Shift+Tab", "cycle tabs"},
 	{": or Ctrl+P", "command palette"},
 	{"?", "this help"},
+	{"r (Nodes tab)", "refresh nodes"},
 	{"q / Ctrl+C", "quit"},
 }
 
@@ -30,8 +31,11 @@ var helpKeys = []helpEntry{
 // an unlisted command is invisible, and a listed-but-removed one shows
 // up in review as a dead row.
 var helpCommands = []helpEntry{
+	{":node <user>", "send a node request (exact username)"},
+	{":nodes", "refresh the Nodes tab"},
+	{":accept <user>", "accept a node request or a changed key"},
+	{":block <user> confirm", "block a user (silent, no undo)"},
 	{":chat <user>", "open an encrypted thread"},
-	{":accept <user>", "trust a contact's changed key"},
 	{":verify <user|hex>", "compare key fingerprints"},
 	{":send <path>", "send a file in the open chat"},
 	{":files", "view, save or ignore received files"},
@@ -61,17 +65,23 @@ func (m Model) renderHelp() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s\n\n", title, hint)
 
-	b.WriteString(m.theme.StatusBar.Render("Keys") + "\n")
+	b.WriteString(m.theme.StatusBar.Render("Keys"))
+	b.WriteByte('\n')
 	for _, entry := range helpKeys {
-		b.WriteString(m.renderHelpEntry(entry) + "\n")
+		b.WriteString(m.renderHelpEntry(entry))
+		b.WriteByte('\n')
 	}
 
-	b.WriteString("\n" + m.theme.StatusBar.Render("Commands") + "\n")
+	b.WriteByte('\n')
+	b.WriteString(m.theme.StatusBar.Render("Commands"))
+	b.WriteByte('\n')
 	for _, entry := range helpCommands {
-		b.WriteString(m.renderHelpEntry(entry) + "\n")
+		b.WriteString(m.renderHelpEntry(entry))
+		b.WriteByte('\n')
 	}
 
-	b.WriteString("\n" + m.theme.Muted.Render(
+	b.WriteByte('\n')
+	b.WriteString(m.theme.Muted.Render(
 		"Chat: type and enter to send · esc back to the thread list"))
 	return b.String()
 }

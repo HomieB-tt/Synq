@@ -60,8 +60,8 @@ func TestHandleWSFrameSurfacesNodeEvents(t *testing.T) {
 		event ws.Event
 		want  string
 	}{
-		{ws.Event{Type: ws.EventTypeNodeRequest, From: "usr_a"}, "Node request from usr_a"},
-		{ws.Event{Type: ws.EventTypeNodeAccepted, From: "usr_b"}, "accepted by usr_b"},
+		{ws.Event{Type: ws.EventTypeNodeRequest, From: "usr_a"}, "New node request"},
+		{ws.Event{Type: ws.EventTypeNodeAccepted, From: "usr_b"}, "was accepted"},
 	} {
 		_, out := frameToModel(t, newFrameModel(t), wsFrameMsg{event: tc.event})
 		if !strings.Contains(out, tc.want) {

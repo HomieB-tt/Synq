@@ -41,6 +41,19 @@ type Palette struct {
 	Border     color.Color
 	Warning    color.Color
 	Error      color.Color
+	Success    color.Color
+}
+
+// blend returns a color linearly interpolated between c1 (at t=0) and
+// c2 (at t=1). Alpha is always 0xff on the result. Used internally to
+// derive Surface from Background/Foreground.
+func blend(c1, c2 color.Color, t float64) color.Color {
+	r1, g1, b1, _ := c1.RGBA()
+	r2, g2, b2, _ := c2.RGBA()
+	lerp := func(a, b uint32) uint8 {
+		return uint8(float64(a>>8)*(1-t) + float64(b>>8)*t + 0.5)
+	}
+	return color.RGBA{R: lerp(r1, r2), G: lerp(g1, g2), B: lerp(b1, b2), A: 0xff}
 }
 
 // Dracula, Nord, and Monokai are the three palettes named in the
@@ -57,6 +70,7 @@ var (
 		Border:     lipgloss.Color("#44475a"),
 		Warning:    lipgloss.Color("#f1fa8c"),
 		Error:      lipgloss.Color("#ff5555"),
+		Success:    lipgloss.Color("#50fa7b"),
 	}
 
 	Nord = Palette{
@@ -68,6 +82,7 @@ var (
 		Border:     lipgloss.Color("#3b4252"),
 		Warning:    lipgloss.Color("#ebcb8b"),
 		Error:      lipgloss.Color("#bf616a"),
+		Success:    lipgloss.Color("#a3be8c"),
 	}
 
 	Monokai = Palette{
@@ -79,6 +94,7 @@ var (
 		Border:     lipgloss.Color("#49483e"),
 		Warning:    lipgloss.Color("#e6db74"),
 		Error:      lipgloss.Color("#f92672"),
+		Success:    lipgloss.Color("#a6e22e"),
 	}
 
 	// Catppuccin is the Mocha variant - the theme your terminal is
@@ -93,6 +109,7 @@ var (
 		Border:     lipgloss.Color("#45475a"),
 		Warning:    lipgloss.Color("#f9e2af"),
 		Error:      lipgloss.Color("#f38ba8"),
+		Success:    lipgloss.Color("#a6e3a1"),
 	}
 
 	Gruvbox = Palette{
@@ -104,6 +121,7 @@ var (
 		Border:     lipgloss.Color("#3c3836"),
 		Warning:    lipgloss.Color("#fabd2f"),
 		Error:      lipgloss.Color("#fb4934"),
+		Success:    lipgloss.Color("#b8bb26"),
 	}
 
 	TokyoNight = Palette{
@@ -115,6 +133,7 @@ var (
 		Border:     lipgloss.Color("#292e42"),
 		Warning:    lipgloss.Color("#e0af68"),
 		Error:      lipgloss.Color("#f7768e"),
+		Success:    lipgloss.Color("#9ece6a"),
 	}
 
 	Solarized = Palette{
@@ -126,6 +145,7 @@ var (
 		Border:     lipgloss.Color("#073642"),
 		Warning:    lipgloss.Color("#b58900"),
 		Error:      lipgloss.Color("#dc322f"),
+		Success:    lipgloss.Color("#859900"),
 	}
 
 	// OneDark is Atom's flagship theme.
@@ -138,6 +158,7 @@ var (
 		Border:     lipgloss.Color("#3e4451"),
 		Warning:    lipgloss.Color("#e5c07b"),
 		Error:      lipgloss.Color("#e06c75"),
+		Success:    lipgloss.Color("#98c379"),
 	}
 
 	RosePine = Palette{
@@ -149,6 +170,7 @@ var (
 		Border:     lipgloss.Color("#403d52"),
 		Warning:    lipgloss.Color("#f6c177"),
 		Error:      lipgloss.Color("#eb6f92"),
+		Success:    lipgloss.Color("#9ccfd8"),
 	}
 
 	Ayu = Palette{
@@ -160,6 +182,7 @@ var (
 		Border:     lipgloss.Color("#131721"),
 		Warning:    lipgloss.Color("#ffb454"),
 		Error:      lipgloss.Color("#ff3333"),
+		Success:    lipgloss.Color("#aad94c"),
 	}
 
 	Everforest = Palette{
@@ -171,6 +194,7 @@ var (
 		Border:     lipgloss.Color("#414b50"),
 		Warning:    lipgloss.Color("#dbbc7f"),
 		Error:      lipgloss.Color("#e67e80"),
+		Success:    lipgloss.Color("#83c092"),
 	}
 
 	// Aura is Dalton Menezes' "Aura Dark" VS Code theme - dark violet
@@ -184,6 +208,7 @@ var (
 		Border:     lipgloss.Color("#29263c"),
 		Warning:    lipgloss.Color("#ffca85"),
 		Error:      lipgloss.Color("#ff6767"),
+		Success:    lipgloss.Color("#61ffca"),
 	}
 
 	// CarbonFox is the Nightfox family's variant built on IBM's Carbon
@@ -198,6 +223,7 @@ var (
 		Border:     lipgloss.Color("#393939"),
 		Warning:    lipgloss.Color("#ffe97b"),
 		Error:      lipgloss.Color("#fa4d56"),
+		Success:    lipgloss.Color("#42be65"),
 	}
 
 	// CatppuccinFrappe is the Catppuccin project's "Frappé" variant -
@@ -212,6 +238,7 @@ var (
 		Border:     lipgloss.Color("#51576d"),
 		Warning:    lipgloss.Color("#e5c890"),
 		Error:      lipgloss.Color("#e78284"),
+		Success:    lipgloss.Color("#a6d189"),
 	}
 
 	// CatppuccinMacchiato is the Catppuccin project's "Macchiato"
@@ -225,6 +252,7 @@ var (
 		Border:     lipgloss.Color("#494d64"),
 		Warning:    lipgloss.Color("#eed49f"),
 		Error:      lipgloss.Color("#ed8796"),
+		Success:    lipgloss.Color("#a6da95"),
 	}
 
 	// Cobalt2 is Wes Bos' long-running VS Code theme - deep blue
@@ -238,6 +266,7 @@ var (
 		Border:     lipgloss.Color("#0d3a58"),
 		Warning:    lipgloss.Color("#ff9d00"),
 		Error:      lipgloss.Color("#ff2222"),
+		Success:    lipgloss.Color("#3ad900"),
 	}
 
 	// Cursor is an original palette for this list, not a reproduction
@@ -253,6 +282,7 @@ var (
 		Border:     lipgloss.Color("#2a2a2a"),
 		Warning:    lipgloss.Color("#e5c07b"),
 		Error:      lipgloss.Color("#ff6b6b"),
+		Success:    lipgloss.Color("#50fa7b"),
 	}
 
 	// Flexoki is Steph Ango's ink-on-paper-inspired scheme (dark
@@ -266,6 +296,7 @@ var (
 		Border:     lipgloss.Color("#343331"),
 		Warning:    lipgloss.Color("#ad8301"),
 		Error:      lipgloss.Color("#d14d41"),
+		Success:    lipgloss.Color("#66800b"),
 	}
 
 	// GitHub is GitHub's own "Dark" default editor/UI theme.
@@ -278,6 +309,7 @@ var (
 		Border:     lipgloss.Color("#30363d"),
 		Warning:    lipgloss.Color("#d29922"),
 		Error:      lipgloss.Color("#f85149"),
+		Success:    lipgloss.Color("#3fb950"),
 	}
 
 	// Kanagawa is the Neovim colorscheme inspired by Katsushika
@@ -292,6 +324,7 @@ var (
 		Border:     lipgloss.Color("#54546d"),
 		Warning:    lipgloss.Color("#c0a36e"),
 		Error:      lipgloss.Color("#c34043"),
+		Success:    lipgloss.Color("#76946a"),
 	}
 
 	// LucentOrng is an original palette (no established "lucent-orng"
@@ -307,6 +340,7 @@ var (
 		Border:     lipgloss.Color("#2e2620"),
 		Warning:    lipgloss.Color("#ffb672"),
 		Error:      lipgloss.Color("#ff5c4d"),
+		Success:    lipgloss.Color("#7fc67a"),
 	}
 
 	// Material is the Material Theme's darker variant - neutral
@@ -320,6 +354,7 @@ var (
 		Border:     lipgloss.Color("#333333"),
 		Warning:    lipgloss.Color("#ffcb6b"),
 		Error:      lipgloss.Color("#f07178"),
+		Success:    lipgloss.Color("#c3e88d"),
 	}
 
 	// Matrix is an original, deliberately literal palette - black
@@ -334,6 +369,7 @@ var (
 		Border:     lipgloss.Color("#003b00"),
 		Warning:    lipgloss.Color("#00cc33"),
 		Error:      lipgloss.Color("#ff1a1a"),
+		Success:    lipgloss.Color("#00cc33"),
 	}
 
 	// Mercury is an original palette (no established "mercury" color
@@ -348,6 +384,7 @@ var (
 		Border:     lipgloss.Color("#2b323b"),
 		Warning:    lipgloss.Color("#d8b36a"),
 		Error:      lipgloss.Color("#d97469"),
+		Success:    lipgloss.Color("#7aad9a"),
 	}
 
 	// NightOwl is Sarah Drasner's theme, built for coding late/in low
@@ -361,6 +398,7 @@ var (
 		Border:     lipgloss.Color("#1d3b53"),
 		Warning:    lipgloss.Color("#ecc48d"),
 		Error:      lipgloss.Color("#ef5350"),
+		Success:    lipgloss.Color("#22da6e"),
 	}
 
 	// Orng is an original palette (no established "orng" color scheme
@@ -376,6 +414,7 @@ var (
 		Border:     lipgloss.Color("#322c24"),
 		Warning:    lipgloss.Color("#ffab5e"),
 		Error:      lipgloss.Color("#ff4d4d"),
+		Success:    lipgloss.Color("#7ab87a"),
 	}
 
 	// OsakaJade is an original palette (no established "osaka-jade"
@@ -391,6 +430,7 @@ var (
 		Border:     lipgloss.Color("#1c3229"),
 		Warning:    lipgloss.Color("#e0c068"),
 		Error:      lipgloss.Color("#e06868"),
+		Success:    lipgloss.Color("#83c092"),
 	}
 
 	// Palenight is the Material Theme's purple-leaning "Palenight"
@@ -404,6 +444,7 @@ var (
 		Border:     lipgloss.Color("#3a3f58"),
 		Warning:    lipgloss.Color("#ffcb6b"),
 		Error:      lipgloss.Color("#f07178"),
+		Success:    lipgloss.Color("#c3e88d"),
 	}
 
 	// Synthwave84 is Robb Owen's "SynthWave '84" theme - deep purple
@@ -417,6 +458,7 @@ var (
 		Border:     lipgloss.Color("#34294f"),
 		Warning:    lipgloss.Color("#fede5d"),
 		Error:      lipgloss.Color("#fe4450"),
+		Success:    lipgloss.Color("#72f1b8"),
 	}
 
 	// System doesn't hardcode any colors at all - every field is set
@@ -436,6 +478,7 @@ var (
 		Border:     lipgloss.Color("8"),  // bright black
 		Warning:    lipgloss.Color("11"), // bright yellow
 		Error:      lipgloss.Color("9"),  // bright red
+		Success:    lipgloss.Color("10"), // bright green
 	}
 
 	// Vesper is Rauno Freiberg's minimalist theme - near-black
@@ -449,6 +492,7 @@ var (
 		Border:     lipgloss.Color("#262626"),
 		Warning:    lipgloss.Color("#e6b673"),
 		Error:      lipgloss.Color("#ff8080"),
+		Success:    lipgloss.Color("#80c980"),
 	}
 )
 
@@ -515,17 +559,34 @@ type Theme struct {
 	TabActive   lipgloss.Style
 	TabInactive lipgloss.Style
 	Border      lipgloss.Style
+	BorderFocus lipgloss.Style // Border with accent foreground, for focused inputs
 	StatusBar   lipgloss.Style
 	CommandBar  lipgloss.Style
+	Text        lipgloss.Style // Base body text: Foreground on Background
+	AccentText  lipgloss.Style // Accent-colored text: Accent on Background
 	Muted       lipgloss.Style
+	Selected    lipgloss.Style // Highlighted list row: Foreground on Surface
 	Warning     lipgloss.Style
 	Error       lipgloss.Style
+
+	// Surface and Success are raw colors rather than full styles so
+	// callers can compose them freely (e.g. .Background(t.Surface),
+	// .Foreground(t.Success)) without fighting an existing style.
+	Surface color.Color // Slightly elevated background for cards / selected rows
+	Success color.Color // Positive / "encrypted" indicator color
 }
 
 // New derives a full Theme from a Palette.
 func New(p Palette) Theme {
+	// Surface is a slightly elevated version of the background - just
+	// enough to make a selected row or input box visible without
+	// introducing a jarring contrast step.
+	surface := blend(p.Background, p.Foreground, 0.08)
+
 	return Theme{
 		Palette: p,
+		Surface: surface,
+		Success: p.Success,
 
 		Screen: lipgloss.NewStyle().
 			Background(p.Background).
@@ -548,6 +609,12 @@ func New(p Palette) Theme {
 			Background(p.Background).
 			Foreground(p.Foreground),
 
+		BorderFocus: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(p.Accent).
+			Background(p.Background).
+			Foreground(p.Foreground),
+
 		StatusBar: lipgloss.NewStyle().
 			Foreground(p.Muted).
 			Background(p.Background),
@@ -557,9 +624,21 @@ func New(p Palette) Theme {
 			Background(p.Background).
 			Padding(0, 1),
 
+		Text: lipgloss.NewStyle().
+			Foreground(p.Foreground).
+			Background(p.Background),
+
+		AccentText: lipgloss.NewStyle().
+			Foreground(p.Accent).
+			Background(p.Background),
+
 		Muted: lipgloss.NewStyle().
 			Foreground(p.Muted).
 			Background(p.Background),
+
+		Selected: lipgloss.NewStyle().
+			Foreground(p.Foreground).
+			Background(surface),
 
 		Warning: lipgloss.NewStyle().
 			Foreground(p.Warning).

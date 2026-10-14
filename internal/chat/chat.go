@@ -101,6 +101,40 @@ func (s *Store) Threads() []ContactKey {
 	return out
 }
 
+// Len returns the number of messages in contact's thread, or 0 if
+// no thread exists yet.
+func (s *Store) Len(contact ContactKey) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.threads[contact])
+}
+
+// Slice returns a copy of the messages in contact's thread in the
+// half-open range [start, end), clamped to the thread's actual length.
+// Like Messages, each Body is deep-copied so callers cannot reach back
+// into Store's state through the returned slice.
+func (s *Store) Slice(contact ContactKey, start, end int) []Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	msgs := s.threads[contact]
+	if start < 0 {
+		start = 0
+	}
+	if end > len(msgs) {
+		end = len(msgs)
+	}
+	if start >= end {
+		return nil
+	}
+	src := msgs[start:end]
+	out := make([]Message, len(src))
+	for i, m := range src {
+		out[i] = m
+		out[i].Body = append([]byte(nil), m.Body...)
+	}
+	return out
+}
+
 // HasThread reports whether contact has an existing thread, so a
 // caller (e.g. the `:chat <pubkey>` command) can tell "opening an
 // existing conversation" apart from "starting a new one" without

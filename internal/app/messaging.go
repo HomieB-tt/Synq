@@ -297,6 +297,7 @@ func (m *Model) handleSealed(contact chat.ContactKey, body []byte) tea.Cmd {
 		At:       time.Now(),
 		Outgoing: false,
 	})
+	m.noteIncoming(contact)
 	return nil
 }
 

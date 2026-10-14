@@ -62,6 +62,10 @@ Requires Go 1.23+.
 | `:verify <username>` | Compare your identity's fingerprint against the key pinned for that username (`DESIGN.md` section 2), for out-of-band verification. If a key change is pending, it compares against the **new**, not-yet-accepted key - the one you're about to trust. Requires having looked the username up at least once (`:chat` them first). |
 | `:verify <hex-pubkey>` | Same fingerprint, computed against a raw hex-encoded public key instead - for a key someone handed you directly, with no lookup involved. |
 | `:accept <username>` | Trust a contact whose public key **changed** since you pinned it (the hard warning of `DESIGN.md` section 2). Until you do, sending to them is blocked; compare fingerprints with `:verify` first if you want to check out-of-band. |
+| `:node <username>` | Send a node request to someone by their exact username (there's no user search - they have to tell you). Once they accept, you can `:chat` and `:send` to each other. |
+| `:nodes` | Open the Nodes tab and refresh it. Also `r` while on that tab. Shows requests waiting for you, your active nodes, and requests you've sent. |
+| `:accept <username>` | Accept a node request from that user. (The same command also trusts a contact's changed key - see below.) |
+| `:block <username> confirm` | Block a user. Silent - they aren't told - and there's no undo from the client. Blocked users never appear in the list. |
 | `:send <path>` | Send a file (up to 100 MB) to the contact in the open chat - use `Ctrl+P` to reach the command palette from inside a thread. Only works between active nodes. The file is encrypted on your machine; synq-server never sees its contents, name or key. It stays available while you remain connected. |
 | `:files` | List files contacts have offered you. `Enter` downloads one and checks it; `v` opens it in your default application; `s` saves it to your save folder; `i` ignores it. Anything not saved is deleted when you quit. |
 | `:savedir [path]` | Show or set the folder `s` saves files to (created if missing; `~` works). Files are never overwritten. |

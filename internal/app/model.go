@@ -325,6 +325,13 @@ type Model struct {
 	saveDir         string
 	fileOpen        transfer.Opener
 
+	// Nodes tab (see nodes.go). nodes is the last relationship list the
+	// server returned; nodesLoaded distinguishes "none" from "not
+	// fetched yet", and nodesErr is the last failed refresh, if any.
+	nodes       []api.NodeRelationship
+	nodesLoaded bool
+	nodesErr    string
+
 	// helpOpen is true while the ? / `:help` overlay is showing (see
 	// help.go). Like the theme picker it captures every key and
 	// closes on the next press.
@@ -455,6 +462,19 @@ type Model struct {
 	// db.pinned_keys).
 	pendingKeyChanges map[string]*api.PublicKeys
 
+	// chatListIndex is the highlighted row in the thread-list view
+	// (when chatActive == ""). Owned by chatview.go's moveChatList
+	// and openSelectedChat.
+	chatListIndex int
+
+	// chatScroll is how many messages back from the newest the open
+	// thread is scrolled. chatScrollFor records which contact that
+	// offset belongs to, so switching threads resets the view
+	// without each code path having to do it manually. Both are
+	// owned by chatview.go's scrollChat / noteIncoming.
+	chatScroll    int
+	chatScrollFor chat.ContactKey
+
 	quitting bool
 }
 
@@ -552,6 +572,7 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, startWSCmd(m.apiClient.BaseURL, m.accessToken))
 		cmds = append(cmds, uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username))
 		cmds = append(cmds, m.startFileSession())
+		cmds = append(cmds, m.fetchNodesCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -589,6 +610,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatResolveResultMsg:
 		return m.handleChatResolveResult(msg)
+
+	case nodesLoadedMsg:
+		return m.handleNodesLoaded(msg)
+
+	case nodeActionMsg:
+		return m.handleNodeAction(msg)
 
 	case fileSessionMsg:
 		return m.handleFileSession(msg)
@@ -776,15 +803,14 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), handle)
 
 	case msg.event.Type == ws.EventTypeNodeRequest:
-		// TODO(nodes): this belongs in the Nodes tab, which fetches
-		// nothing at all yet (see renderContent's tabNodes case).
-		// All the server sends is the requester's user id - no
-		// username, and no reverse lookup to turn one into the other -
-		// so show it raw rather than drop it silently.
-		m.commandMsg = fmt.Sprintf("Node request from %s - node management isn't wired up yet", msg.event.From)
+		// The frame carries only the requester's id; the refresh below
+		// brings their username into the Nodes tab.
+		m.commandMsg = "New node request - see the Nodes tab (2) and :accept <username>."
+		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), m.fetchNodesCmd())
 
 	case msg.event.Type == ws.EventTypeNodeAccepted:
-		m.commandMsg = fmt.Sprintf("Node request accepted by %s - node management isn't wired up yet", msg.event.From)
+		m.commandMsg = "A node request you sent was accepted - see the Nodes tab (2)."
+		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), m.fetchNodesCmd())
 
 	default:
 		// A frame type this client has never heard of. DecodeFrame
@@ -907,6 +933,36 @@ func (m Model) handleBackgroundColor(msg tea.BackgroundColorMsg) Model {
 
 // updateNormalMode handles keys when the command palette is closed.
 func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The thread list is the one normal-mode screen with a selection to
+	// move. These keys are only claimed there - j/k/enter mean nothing
+	// anywhere else, and an open thread never reaches this function
+	// (see Update: it routes to updateChatCompose first).
+	if m.activeTab == tabChat && m.identity != nil && m.chatActive == "" {
+		switch msg.String() {
+		case "up", "k":
+			m.chatListIndex--
+			threads := m.chatStore.Threads()
+			if m.chatListIndex < 0 {
+				m.chatListIndex = len(threads) - 1
+			}
+			return m, nil
+		case "down", "j":
+			m.chatListIndex++
+			threads := m.chatStore.Threads()
+			if len(threads) > 0 && m.chatListIndex >= len(threads) {
+				m.chatListIndex = 0
+			}
+			return m, nil
+		case "enter":
+			threads := m.chatStore.Threads()
+			if len(threads) > 0 && m.chatListIndex >= 0 && m.chatListIndex < len(threads) {
+				m.chatActive = threads[m.chatListIndex]
+				m.chatInput = ""
+			}
+			return m, nil
+		}
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
@@ -937,6 +993,11 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "?":
 		m.helpOpen = true
+
+	case "r":
+		if m.activeTab == tabNodes {
+			return m, m.fetchNodesCmd()
+		}
 	}
 
 	return m, nil
@@ -1009,6 +1070,19 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.commandMsg = ""
 		return m, nil
 
+	case "pgup":
+		m.scrollChat(chatPageStep)
+		return m, nil
+	case "pgdown":
+		m.scrollChat(-chatPageStep)
+		return m, nil
+	case "home":
+		m.scrollChat(m.chatStore.Len(m.chatActive))
+		return m, nil
+	case "end":
+		m.scrollChat(-m.chatStore.Len(m.chatActive))
+		return m, nil
+
 	case "enter":
 		body := strings.TrimSpace(m.chatInput)
 		if body == "" {
@@ -1029,6 +1103,9 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			At:       time.Now(),
 			Outgoing: true,
 		})
+		// Sending is a request to see what you sent: jump back to the
+		// live end however far up you were reading.
+		m.chatScroll, m.chatScrollFor = 0, m.chatActive
 		// The echo above is local and instant; what comes back is
 		// either the sealed frame (session key already established) or
 		// a handshake frame plus a parked body to seal once the
@@ -1135,7 +1212,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		username := fields[1]
 		pending, ok := m.pendingKeyChanges[username]
 		if !ok {
-			return fmt.Sprintf("No unaccepted key change on file for %s.", username), false, nil
+			// Not a key change: it's a node request from them, if
+			// anything (nodes.go).
+			result, acceptCmd := m.acceptNode(username)
+			return result, false, acceptCmd
 		}
 		if m.store == nil {
 			return "No key store on this model - can't pin a new key.", false, nil
@@ -1226,6 +1306,21 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "Log in first - :register <username> if you haven't registered, or :login if you have.", false, nil
 		}
 		return fmt.Sprintf("Looking up %s...", fields[1]), false, resolveChatContactCmd(m.apiClient, m.accessToken, fields[1])
+
+	case "node":
+		result, nodeCmd := m.requestNode(strings.Join(fields[1:], ""))
+		return result, false, nodeCmd
+
+	case "nodes":
+		m.activeTab = tabNodes
+		if msg := m.nodePrecheck(); msg != "" {
+			return msg, false, nil
+		}
+		return "Refreshing your nodes...", false, m.fetchNodesCmd()
+
+	case "block":
+		result, blockCmd := m.blockNode(fields[1:])
+		return result, false, blockCmd
 
 	case "send":
 		result, sendCmd := m.sendFileCmd(strings.TrimSpace(strings.TrimPrefix(cmd, "send")))
@@ -1569,16 +1664,15 @@ func (m Model) renderContent() string {
 			body += "\n\nYou're browsing as a guest - post authors show as \"node\" until you create an identity."
 		}
 	case tabNodes:
-		if m.identity == nil {
-			body = "Create an identity to build your network. Restart Synq and choose \"Create your identity.\""
-		} else {
-			body = "No nodes yet. Node requests will show up here."
-		}
+		body = m.renderNodes()
 	case tabChat:
 		if m.identity == nil {
 			body = "Create an identity to send encrypted messages. Restart Synq and choose \"Create your identity.\""
 		} else {
-			body = m.renderChat()
+			// renderChat manages its own border and sizing via
+			// panelStyle/contentSize/innerSize - return it directly
+			// rather than double-wrapping it in the Border below.
+			return m.renderChat()
 		}
 	case tabProfile:
 		body = m.renderProfile()
@@ -1591,82 +1685,42 @@ func (m Model) renderContent() string {
 		Render(body)
 }
 
-// renderChat draws the Chat tab: the thread list when no thread is
-// open (m.chatActive == ""), or one open conversation plus its compose
-// input otherwise. See updateChatCompose for the key handling this
-// pairs with, and the Model.chatStore doc comment for what "session-
-// only" and "not yet connected" mean here.
-func (m Model) renderChat() string {
+// hintText returns the general key-hint shown in the status bar at the
+// bottom of the chat pane. It covers thread-list navigation when no
+// thread is open, and a lightweight reminder when one is (the
+// compose-specific hint is drawn inside the pane by renderChatThread).
+func (m Model) hintText() string {
 	if m.chatActive == "" {
-		threads := m.chatStore.Threads()
-		if len(threads) == 0 {
-			return "No open chats. Chat history is session-only - see DESIGN.md section 4.\n\n" +
-				"Start one with :chat <username>."
-		}
-
-		var b strings.Builder
-		b.WriteString("Chats:\n\n")
-		for _, contact := range threads {
-			msgs := m.chatStore.Messages(contact)
-			last := msgs[len(msgs)-1]
-			fmt.Fprintf(&b, "  %s  (%d) %s\n", m.chatContactLabel(contact), len(msgs), truncateRunes(sanitizeForTerminal(string(last.Body)), 40))
-		}
-		b.WriteString("\nOpen one with :chat <username>.")
-		return b.String()
+		return "↑/↓ select · enter open · :chat <username> start a new thread · ctrl+p commands"
 	}
-
-	msgs := m.chatStore.Messages(m.chatActive)
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "Chat with %s\n", m.chatContactLabel(m.chatActive))
-	// State line above the thread: how far this conversation is from
-	// being able to carry a message. Nothing to say when it already
-	// can - a quiet thread is the healthy case. The pin warning
-	// outranks the others: it's the one reason the user must act
-	// before anything sends (DESIGN.md section 2).
-	if reason := m.keyBlockReason(m.chatActive); reason != "" {
-		b.WriteString(m.theme.Warning.Render(reason) + "\n\n")
-	} else {
-		switch {
-		case m.wsClient == nil:
-			b.WriteString(m.theme.Muted.Render("Not connected to synq-server - anything you send stays local until the connection is back.") + "\n\n")
-		case !m.hasSessionKey(m.chatActive):
-			b.WriteString(m.theme.Muted.Render("Handshake pending - messages go out as soon as this contact's key arrives.") + "\n\n")
-		}
-	}
-
-	if len(msgs) == 0 {
-		b.WriteString("(no messages yet)\n")
-	}
-	for _, msg := range msgs {
-		who := "them"
-		if msg.Outgoing {
-			who = "you"
-		}
-		fmt.Fprintf(&b, "[%s] %s: %s\n", msg.At.Format("15:04:05"), who, sanitizeForTerminal(string(msg.Body)))
-	}
-
-	fmt.Fprintf(&b, "\n> %s\n", m.chatInput)
-	b.WriteString(m.theme.Muted.Render(m.composeHint()))
-	return b.String()
+	return "ctrl+p commands · esc back to list"
 }
 
-// composeHint is the line under the composer, worded to match what
-// pressing enter will actually do right now: send, hold until the
-// handshake completes, keep local because there's no connection, or -
-// when the contact's pinned key has changed - not send at all.
+// composeHint is the hint for the current open thread, computed from
+// the active contact's block reason. It exists so tests and any code
+// that already has a Model in hand can call it without pre-computing
+// the reason; renderChatThread uses composeHintFor instead so it can
+// share one keyBlockReason call with chatStatusLines.
 func (m Model) composeHint() string {
-	if m.keyBlockReason(m.chatActive) != "" {
-		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · ctrl+p commands · esc back to chat list",
+	return m.composeHintFor(m.keyBlockReason(m.chatActive))
+}
+
+// composeHintFor is the hint line shown beneath the composer in an open
+// thread, worded to match what pressing enter will actually do right
+// now. It takes a pre-computed blockReason so renderChatThread can call
+// keyBlockReason once and pass it to both chatStatusLines and here.
+func (m Model) composeHintFor(blockReason string) string {
+	if blockReason != "" {
+		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · ctrl+p commands · esc back to list",
 			m.chatContactLabel(m.chatActive))
 	}
 	switch {
 	case m.wsClient == nil:
-		return "enter send (stays local while disconnected) · ctrl+p commands · esc back to chat list"
+		return "enter send (stays local while disconnected) · ctrl+p commands · esc back to list"
 	case !m.hasSessionKey(m.chatActive):
-		return "enter send (queued until the handshake completes) · ctrl+p commands · esc back to chat list"
+		return "enter send (queued until the handshake completes) · ctrl+p commands · esc back to list"
 	default:
-		return "enter send · ctrl+p commands · esc back to chat list"
+		return "enter send · ctrl+p commands · esc back to list"
 	}
 }
 

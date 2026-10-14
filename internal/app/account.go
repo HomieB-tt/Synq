@@ -99,7 +99,7 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 	// Now that there's an access token, start the WS connection the
 	// same way Init does at startup - this is the only other place
 	// that can transition "no token" into "should be connected".
-	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession())
+	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd())
 }
 
 // --- :login (manual) ---
@@ -162,6 +162,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 		startWSCmd(m.apiClient.BaseURL, m.accessToken),
 		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
 		m.startFileSession(),
+		m.fetchNodesCmd(),
 	)
 }
 
@@ -230,6 +231,9 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	// can't be terminated politely; the server expires it on its own.
 	// What this launch received is wiped now rather than left lying
 	// around for whoever logs in next.
+	m.nodes = nil
+	m.nodesLoaded = false
+	m.nodesErr = ""
 	m.fileSession = ""
 	m.files = nil
 	m.filePickerOpen = false

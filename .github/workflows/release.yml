@@ -32,3 +32,126 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notarize-macos:
+    needs: release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check Apple signing credentials
+        id: credentials
+        shell: bash
+        run: |
+          if [[ -z "$APPLE_CERTIFICATE" && -z "$APPLE_CERTIFICATE_PASSWORD" && -z "$APPLE_SIGNING_IDENTITY" && -z "$APPLE_API_KEY" && -z "$APPLE_API_KEY_ID" && -z "$APPLE_API_ISSUER_ID" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping macOS signing and notarization because Apple signing secrets are not configured."
+            exit 0
+          fi
+
+          check_secret() {
+            if [[ -z "$2" ]]; then
+              echo "::error::Missing required repository secret: $1"
+              exit 1
+            fi
+          }
+          check_secret APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
+          check_secret APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+          check_secret APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
+          check_secret APPLE_API_KEY "$APPLE_API_KEY"
+          check_secret APPLE_API_KEY_ID "$APPLE_API_KEY_ID"
+          check_secret APPLE_API_ISSUER_ID "$APPLE_API_ISSUER_ID"
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        if: steps.credentials.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/synq-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -k "$keychain_path"
+          security set-keychain-settings -t 3600 -u "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          rm "$certificate_path"
+
+      - name: Download and sign macOS binaries
+        if: steps.credentials.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/synq-release"
+          signed_dir="$RUNNER_TEMP/synq-signed"
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          mkdir -p "$release_dir" "$signed_dir"
+
+          printf '%s' "$APPLE_API_KEY" | base64 -D > "$key_path"
+          chmod 600 "$key_path"
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'synq_*_darwin_*.tar.gz' \
+            --pattern checksums.txt \
+            --dir "$release_dir"
+
+          for archive in "$release_dir"/synq_*_darwin_*.tar.gz; do
+            base="$(basename "$archive" .tar.gz)"
+            arch_dir="$RUNNER_TEMP/$base"
+            mkdir -p "$arch_dir"
+            tar -xzf "$archive" -C "$arch_dir"
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$arch_dir/synq"
+
+            package_dir="$arch_dir/package"
+            mkdir -p "$package_dir"
+            cp "$arch_dir/synq" "$arch_dir/README.md" "$arch_dir/LICENSE" "$package_dir/"
+            ditto -c -k "$package_dir" "$signed_dir/$base.zip"
+            xcrun notarytool submit "$signed_dir/$base.zip" \
+              --key "$key_path" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" \
+              --wait
+          done
+
+          cd "$signed_dir"
+          shasum -a 256 synq_*_darwin_*.zip > "$release_dir/macos-checksums.txt"
+          cd "$release_dir"
+          grep -Ev 'synq_.*_darwin_.*\.tar\.gz$' checksums.txt > updated-checksums.txt
+          cat macos-checksums.txt >> updated-checksums.txt
+          mv updated-checksums.txt checksums.txt
+
+          gh release upload "$GITHUB_REF_NAME" "$signed_dir"/synq_*_darwin_*.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          for archive in synq_*_darwin_*.tar.gz; do
+            gh release delete-asset "$GITHUB_REF_NAME" "$archive" \
+              --repo "$GITHUB_REPOSITORY" --yes
+          done
+          gh release upload "$GITHUB_REF_NAME" checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    needs:
+      - release
+      - notarize-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"

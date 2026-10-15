@@ -352,6 +352,19 @@ type Model struct {
 	composeOpen        bool
 	compose            composeState
 
+	// cmdListOpen is true while the command list (Profile tab `c`, or
+	// :commands) is showing, and cmdListIndex is the selected command's
+	// position in commandSpecs. promptOpen / prompt back the popup that a
+	// bare :send, :savedir etc. opens, and welcomeOpen the getting-started
+	// guide. All three capture every key while open - see commands.go,
+	// prompt.go and welcome.go.
+	cmdListOpen  bool
+	cmdListIndex int
+	promptOpen   bool
+	prompt       promptState
+	welcomeOpen  bool
+	welcomePage  int
+
 	// helpOpen is true while the ? / `:help` overlay is showing (see
 	// help.go). Like the theme picker it captures every key and
 	// closes on the next press.
@@ -569,7 +582,17 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 // the passphrase bootstrap and session resolution in cmd/synq/main.go
 // into the interactive TUI.
 func Run(id *crypto.Identity, store *db.KeyStore, session Session) error {
-	_, err := tea.NewProgram(New(id, store, session)).Run()
+	m := New(id, store, session)
+	// The getting-started guide appears once, over the main UI after the
+	// startup splash, and is remembered when dismissed. It is set here and
+	// not in New so that building a Model (tests, mostly) never starts
+	// with an overlay capturing the first key.
+	if store != nil {
+		if _, err := store.LoadPreference(db.PrefWelcomed); err != nil {
+			m.welcomeOpen = true
+		}
+	}
+	_, err := tea.NewProgram(m).Run()
 	return err
 }
 
@@ -764,6 +787,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// trapping the user in a fixed-duration animation.
 			m.booting = false
 			return m, nil
+		}
+		if m.welcomeOpen {
+			return m.updateWelcome(msg)
+		}
+		if m.cmdListOpen {
+			return m.updateCommandList(msg)
+		}
+		if m.promptOpen {
+			return m.updatePrompt(msg)
 		}
 		if m.helpOpen {
 			// Any key closes it - same as the boot skip: the panel is
@@ -1042,6 +1074,13 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.helpOpen = true
 
+	case "c":
+		// The command list lives under Profile; anywhere else "c" is
+		// not a key (on the Feed it's handled before this point).
+		if m.activeTab == tabProfile {
+			m.openCommandList()
+		}
+
 	case "r":
 		if m.activeTab == tabNodes {
 			return m, m.fetchNodesCmd()
@@ -1061,20 +1100,10 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		result, quit, cmd := m.runCommand(strings.TrimSpace(m.commandInput))
-		m.commandMsg = result
+		line := m.commandInput
 		m.commandMode = false
 		m.commandInput, m.commandBack = "", 0
-		if quit {
-			m.quitting = true
-			if m.wsClient != nil {
-				m.wsClient.Close()
-			}
-			m.chatStore.Purge()
-			return m, m.quitCmd()
-		}
-		return m, cmd
-
+		return m.execCommand(line)
 	}
 
 	// Cursor movement and deletion (arrows, Home/End, Backspace, Delete,
@@ -1094,6 +1123,30 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// bare is runCommand's answer to a command that needs an argument but was
+// run without one: open its prompt (see prompt.go), or say why it can't.
+func (m *Model) bare(name string) (string, bool, tea.Cmd) {
+	return m.openPrompt(name), false, nil
+}
+
+// execCommand runs one palette command line and turns the result into the
+// model update: the message for the bottom bar, an async command, or quit.
+// It is the one path for a command typed in the palette, picked from the
+// command list, or finished in a prompt.
+func (m Model) execCommand(line string) (tea.Model, tea.Cmd) {
+	result, quit, cmd := m.runCommand(strings.TrimSpace(line))
+	m.commandMsg = result
+	if quit {
+		m.quitting = true
+		if m.wsClient != nil {
+			m.wsClient.Close()
+		}
+		m.chatStore.Purge()
+		return m, m.quitCmd()
+	}
+	return m, cmd
 }
 
 // updateChatCompose handles keys while a chat thread is open (Chat tab
@@ -1228,10 +1281,8 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
 		}
 		if len(fields) == 1 {
-			if m.displayName == "" {
-				return "No display name set. Usage: :name <your name> (or :name clear).", false, nil
-			}
-			return fmt.Sprintf("Display name: %s. Usage: :name <your name> (or :name clear).", m.displayName), false, nil
+			// The prompt starts from the current name, so it also shows it.
+			return m.bare("name")
 		}
 		if len(fields) == 2 && fields[1] == "clear" {
 			m.displayName = ""
@@ -1254,6 +1305,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		// The acknowledgement half of DESIGN.md section 2's hard
 		// warning: adopt the stashed (contradicting) keys as the new
 		// pin, which is also what unblocks sending to that contact.
+		if len(fields) == 1 {
+			return m.bare("accept")
+		}
 		if len(fields) != 2 {
 			return "Usage: :accept <username>", false, nil
 		}
@@ -1294,6 +1348,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 	case "verify":
 		if m.identity == nil {
 			return "Create an identity first. Restart Synq and choose \"Create your identity\".", false, nil
+		}
+		if len(fields) == 1 {
+			return m.bare("verify")
 		}
 		if len(fields) != 2 {
 			return "Usage: :verify <username|hex-encoded public key>", false, nil
@@ -1344,6 +1401,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		if m.identity == nil {
 			return "Create an identity first. Restart Synq and choose \"Create your identity.\"", false, nil
 		}
+		if len(fields) == 1 {
+			return m.bare("chat")
+		}
 		if len(fields) != 2 {
 			return "Usage: :chat <username>", false, nil
 		}
@@ -1356,6 +1416,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		return fmt.Sprintf("Looking up %s...", fields[1]), false, resolveChatContactCmd(m.apiClient, m.accessToken, fields[1])
 
 	case "node":
+		if len(fields) == 1 {
+			return m.bare("node")
+		}
 		result, nodeCmd := m.requestNode(strings.Join(fields[1:], ""))
 		return result, false, nodeCmd
 
@@ -1382,6 +1445,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		return result, false, reportCmd
 
 	case "send":
+		if len(fields) == 1 {
+			return m.bare("send")
+		}
 		result, sendCmd := m.sendFileCmd(strings.TrimSpace(strings.TrimPrefix(cmd, "send")))
 		return result, false, sendCmd
 
@@ -1389,6 +1455,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		return m.openFilePicker(), false, nil
 
 	case "savedir":
+		if len(fields) == 1 {
+			return m.bare("savedir")
+		}
 		return m.savedirCommand(strings.TrimSpace(strings.TrimPrefix(cmd, "savedir"))), false, nil
 
 	case "register":
@@ -1400,6 +1469,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		}
 		if m.username != "" {
 			return fmt.Sprintf("Already registered as %s.", m.username), false, nil
+		}
+		if len(fields) == 1 {
+			return m.bare("register")
 		}
 		if len(fields) != 2 {
 			return "Usage: :register <username> (this is permanent - synq-server has no rename yet)", false, nil
@@ -1442,6 +1514,14 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return "GitHub linking isn't configured. Set SYNQ_GITHUB_CLIENT_ID and restart Synq (see README.md).", false, nil
 		}
 		return "Starting GitHub authorization...", false, requestGitHubDeviceCodeCmd(m.githubClientID)
+
+	case "commands":
+		m.openCommandList()
+		return "", false, nil
+
+	case "welcome":
+		m.welcomeOpen, m.welcomePage = true, 0
+		return "", false, nil
 
 	case "help":
 		// The panel is the response - same pattern as `:theme` with
@@ -1710,6 +1790,15 @@ func (m Model) renderContent() string {
 	}
 	if m.filePickerOpen {
 		return placeWithBackground(m.renderFilePicker(), width, height, m.theme.Palette.Background)
+	}
+	if m.welcomeOpen {
+		return placeWithBackground(m.renderWelcome(), width, height, m.theme.Palette.Background)
+	}
+	if m.cmdListOpen {
+		return placeWithBackground(m.renderCommandList(), width, height, m.theme.Palette.Background)
+	}
+	if m.promptOpen {
+		return placeWithBackground(m.renderPrompt(), width, height, m.theme.Palette.Background)
 	}
 	if m.helpOpen {
 		return placeWithBackground(m.renderHelp(), width, height, m.theme.Palette.Background)
@@ -1984,7 +2073,8 @@ func (m Model) renderProfile() string {
 			"Restart Synq and choose \"Create your identity\" from the menu.\n\n" +
 			"Theme switching works right now, even as a guest:\n" +
 			"  :theme                  open the interactive theme picker (live preview)\n" +
-			"  :theme <name>           set a theme directly"
+			"  :theme <name>           set a theme directly\n\n" +
+			"Press c to browse every command and what it does."
 	}
 
 	var b strings.Builder
@@ -1998,17 +2088,14 @@ func (m Model) renderProfile() string {
 	fmt.Fprintf(&b, "Connection: %s\n", connectionLabel(m.connected))
 	fmt.Fprintf(&b, "GitHub: %s\n", m.githubStatusLabel())
 	fmt.Fprintf(&b, "Theme: %s\n\n", m.theme.Palette.Name)
-	b.WriteString("Commands:\n")
-	b.WriteString("  :name <your name>      set your local display name\n")
-	b.WriteString("  :name clear            clear your local display name\n")
-	b.WriteString("  :verify <hex-pubkey>   compare a contact's key fingerprint\n")
-	b.WriteString("  :register <username>   register a username with synq-server (permanent)\n")
-	b.WriteString("  :login                 reconnect after :logout, without restarting\n")
-	b.WriteString("  :logout                revoke all sessions and disconnect\n")
-	b.WriteString("  :chat <username>       open or start an end-to-end encrypted chat thread\n")
-	b.WriteString("  :github                link your GitHub account\n")
-	b.WriteString("  :theme                 open the interactive theme picker (live preview)\n")
-	b.WriteString("  :theme <name>          set a theme directly\n")
+	b.WriteString("Commands - press c to browse them all, with what each one does.\n")
+	b.WriteString("You can also press : (or Ctrl+P in a chat) and type one.\n\n")
+	b.WriteString("Common ones:\n")
+	b.WriteString("  :register <username>   claim your username (permanent)\n")
+	b.WriteString("  :node <username>       ask someone to connect\n")
+	b.WriteString("  :chat <username>       open an encrypted thread\n")
+	b.WriteString("  :send                  send a file in the open chat\n")
+	b.WriteString("  :theme                 pick a theme (live preview)\n")
 	return b.String()
 }
 

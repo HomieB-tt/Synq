@@ -43,6 +43,11 @@ const PrefDisplayName = "display_name"
 // default of on.
 const PrefBoot = "boot"
 
+// PrefWelcomed is the preferences key set once the first-run welcome
+// guide has been dismissed (internal/app/welcome.go). Unset means it has
+// not been seen, so it is shown at the next launch.
+const PrefWelcomed = "welcomed"
+
 // PrefSaveDir is the preferences key under which the directory kept
 // files are saved to is stored (internal/app's `:savedir` command).
 // Unset means the user hasn't chosen one yet, and saving a received file

@@ -120,6 +120,7 @@ Requires Go 1.23+.
 | `:` or `Ctrl+P` | Open command palette |
 | `?` | Open the help panel (keys + commands); any key closes it |
 | `Ctrl+O` | Open `$EDITOR` while composing a post or comment |
+| `c` | Profile tab: browse every command and what it does |
 | `←` `→` `Home` `End` | In any text box (chat message, command palette, post/comment): move the cursor, so a typo can be fixed in place. `Backspace` and `Delete` act at the cursor. |
 | `Alt+←` `Alt+→` (or `Ctrl+←` `Ctrl+→`) | Jump by word |
 | `Ctrl+W` / `Ctrl+U` / `Ctrl+K` | Delete the previous word / back to the start of the line / on to the end of the line |
@@ -129,6 +130,8 @@ Requires Go 1.23+.
 | `q` / `Ctrl+C` | Quit |
 
 ## Command palette
+
+Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `:node`, `:accept`, `:verify`, `:register`, `:name` - and a prompt opens asking for it (as `:theme` opens its picker), so there is no syntax to remember. Typing the argument yourself, as in `:send ~/report.pdf`, still works. Not sure what is available? `:commands` lists everything, and the Profile tab's `c` key opens the same list.
 
 | Command | Does |
 | --- | --- |
@@ -153,6 +156,8 @@ Requires Go 1.23+.
 | `:logout` | Revoke all of this account's sessions and disconnect. |
 | `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Messages go out end-to-end encrypted: a per-launch ephemeral handshake derives a session key (`DESIGN.md` sections 2-3), and the relay only ever sees ciphertext. The first lookup also pins their public key - a later change blocks sends until `:accept`. Chat history is session-only (see `DESIGN.md` section 4). Requires being logged in. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
+| `:commands` | Open the command list - every command, grouped, with an explanation of what it does. `↑`/`↓` select, `Enter` runs it (commands that need an argument open a prompt for it), `Esc` closes. On the Profile tab, press `c`. |
+| `:welcome` | Show the getting-started guide again. It is shown once, on first launch. |
 | `:help` | Same as pressing `?` - the full key/command reference. |
 | `:boot on\|off` | Show (or stop showing) the startup checklist on the next launch. On by default; the splash itself is always skippable with any key. |
 | `:quit` | Same as pressing `q`. |

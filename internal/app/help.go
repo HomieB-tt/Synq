@@ -27,34 +27,9 @@ var helpKeys = []helpEntry{
 	{"Ctrl+U / Ctrl+K", "delete to start / to end of line"},
 	{"PgUp PgDn (chat)", "scroll; Ctrl+Home/End: oldest/newest"},
 	{"Feed: ↑/↓ enter p", "select, open, write a post"},
+	{"c (Profile)", "browse all commands, with explanations"},
 	{"r (Feed/Nodes)", "refresh"},
 	{"q / Ctrl+C", "quit"},
-}
-
-// helpCommands lists every command runCommand understands. Keeping it
-// next to the dispatch switch (both in this package) is deliberate:
-// an unlisted command is invisible, and a listed-but-removed one shows
-// up in review as a dead row.
-var helpCommands = []helpEntry{
-	{":post [category]", "write a Feed post (project|hiring|general)"},
-	{":report [reason]", "report the open Feed post"},
-	{":node <user>", "send a node request (exact username)"},
-	{":nodes", "refresh the Nodes tab"},
-	{":accept <user>", "accept a node request or a changed key"},
-	{":block <user> confirm", "block a user (silent, no undo)"},
-	{":chat <user>", "open an encrypted thread"},
-	{":verify <user|hex>", "compare key fingerprints"},
-	{":send <path>", "send a file in the open chat"},
-	{":files", "view, save or ignore received files"},
-	{":savedir [path]", "folder that saved files go to"},
-	{":theme [name]", "pick or set a theme"},
-	{":name <text>", "set a local display name"},
-	{":register <user>", "register a username (permanent)"},
-	{":login / :logout", "end or start a session"},
-	{":github", "link GitHub (device flow)"},
-	{":boot on|off", "startup checklist on next launch"},
-	{":help", "this panel"},
-	{":quit", "leave Synq"},
 }
 
 // renderHelp draws the ? / `:help` overlay: the key map, then every

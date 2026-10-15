@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/HomieB-tt/synq/internal/chat"
+	"github.com/HomieB-tt/synq/internal/lineedit"
 )
 
 // This file draws the Chat tab. The key handling it pairs with lives in
@@ -70,7 +71,7 @@ func (m Model) bottomLines() []string {
 		width = 80
 	}
 	if m.commandMode {
-		return []string{m.theme.CommandBar.Render(":" + m.commandInput)}
+		return []string{m.commandBarLine()}
 	}
 	if m.commandMsg != "" {
 		wrapped := wrapToWidth(m.commandMsg, width)
@@ -447,15 +448,15 @@ func (m Model) chatMessageLines(prev *chat.Message, msg chat.Message, w int) []s
 }
 
 // chatComposer draws the input: a bordered box (or, on a short pane, a
-// bare prompt) holding the tail of the draft and a cursor. Showing the
-// tail rather than wrapping keeps the composer a fixed height however
-// long the draft grows, and keeps the cursor - always at the end - in
-// view. The cursor is a static block, not a blinking one: blinking would
-// mean a timer redrawing the screen for the sake of a glyph.
+// bare prompt) holding the part of the draft around the cursor. Showing a
+// window of the draft rather than wrapping it keeps the composer a fixed
+// height however long the draft grows, and keeps the cursor in view: with
+// the cursor at the end that is the tail of the draft, and after moving
+// back through it the window follows (lineedit.Window).
 func (m Model) chatComposer(w int, boxed, blocked bool) []string {
 	t := m.theme
 	prompt := t.AccentText.Render("› ")
-	cursor := t.AccentText.Render("█")
+	cursor := t.AccentText.Render("█") // empty draft: the block, then the hint
 
 	inner := w
 	if boxed {
@@ -467,7 +468,9 @@ func (m Model) chatComposer(w int, boxed, blocked bool) []string {
 	if m.chatInput == "" {
 		body = prompt + cursor + t.Muted.Render(truncateToWidth(" Type a message…", max(textW, 1)))
 	} else {
-		body = prompt + t.Text.Render(tailByWidth(sanitizeForTerminal(m.chatInput), textW)) + cursor
+		before, after := lineedit.Split(m.chatInput, m.chatBack)
+		b, a := lineedit.Window(sanitizeForTerminal(before), sanitizeForTerminal(after), textW, runeCells)
+		body = prompt + t.Text.Render(b) + m.cursorSpans(a)
 	}
 
 	if !boxed {
@@ -533,5 +536,5 @@ func (m *Model) openSelectedChat() {
 		return
 	}
 	m.chatActive = threads[min(max(m.chatListIndex, 0), len(threads)-1)]
-	m.chatInput = ""
+	m.chatInput, m.chatBack = "", 0
 }

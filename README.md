@@ -120,6 +120,11 @@ Requires Go 1.23+.
 | `:` or `Ctrl+P` | Open command palette |
 | `?` | Open the help panel (keys + commands); any key closes it |
 | `Ctrl+O` | Open `$EDITOR` while composing a post or comment |
+| `←` `→` `Home` `End` | In any text box (chat message, command palette, post/comment): move the cursor, so a typo can be fixed in place. `Backspace` and `Delete` act at the cursor. |
+| `Alt+←` `Alt+→` (or `Ctrl+←` `Ctrl+→`) | Jump by word |
+| `Ctrl+W` / `Ctrl+U` / `Ctrl+K` | Delete the previous word / back to the start of the line / on to the end of the line |
+| `↑` `↓` | In a post or comment body: move between lines |
+| `PgUp` `PgDn` | Chat thread: scroll. `Ctrl+Home` / `Ctrl+End` jump to the oldest / newest message |
 | `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
 | `q` / `Ctrl+C` | Quit |
 

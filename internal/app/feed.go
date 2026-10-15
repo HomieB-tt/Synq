@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/HomieB-tt/synq/internal/api"
+	"github.com/HomieB-tt/synq/internal/lineedit"
 )
 
 // This file is the Feed tab: the public post stream, a post's comments,
@@ -43,9 +44,14 @@ type composeState struct {
 	category string // for a post
 	title    string
 	body     string
-	field    int // 0 = title, 1 = body (a comment has only a body)
-	err      string
-	sending  bool
+	// titleBack and bodyBack are the cursors: runes from the end of the
+	// text, so a freshly set or cleared string has its cursor at the end
+	// (see lineedit).
+	titleBack int
+	bodyBack  int
+	field     int // 0 = title, 1 = body (a comment has only a body)
+	err       string
+	sending   bool
 }
 
 // --- loading ---
@@ -446,34 +452,30 @@ func (m Model) updateCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			c.field = 1
 			return m, nil
 		}
-		c.body += "\n"
-		return m, nil
-
-	case "backspace":
-		if c.kind == composePost && c.field == 0 {
-			c.title = dropLastRune(c.title)
-		} else {
-			c.body = dropLastRune(c.body)
-		}
+		c.body, c.bodyBack = lineedit.Insert(c.body, c.bodyBack, "\n")
 		return m, nil
 	}
 
+	// Everything else edits the field that has focus, at its cursor. The
+	// title is one line; the body is several, so Up/Down move between
+	// its lines.
+	inTitle := c.kind == composePost && c.field == 0
+	text, back, multiline := &c.body, &c.bodyBack, true
+	if inTitle {
+		text, back, multiline = &c.title, &c.titleBack, false
+	}
+	if t, b, ok := lineedit.Apply(*text, *back, msg.String(), multiline); ok {
+		*text, *back = t, b
+		return m, nil
+	}
 	if msg.Text != "" {
-		if c.kind == composePost && c.field == 0 {
-			c.title += msg.Text
-		} else {
-			c.body += msg.Text
+		typed := sanitizeMultiline(msg.Text)
+		if inTitle {
+			typed = sanitizeSingleLine(msg.Text)
 		}
+		*text, *back = lineedit.Insert(*text, *back, typed)
 	}
 	return m, nil
-}
-
-func dropLastRune(s string) string {
-	r := []rune(s)
-	if len(r) == 0 {
-		return s
-	}
-	return string(r[:len(r)-1])
 }
 
 // openEditor hands the draft body to $EDITOR (DESIGN.md section 8) and
@@ -520,6 +522,7 @@ func (m Model) handleEditorDone(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.compose.body = strings.TrimRight(string(b), "\n")
+	m.compose.bodyBack = 0 // the draft was replaced wholesale; cursor to the end
 	m.compose.field = 1
 	m.compose.err = ""
 	return m, nil
@@ -643,27 +646,46 @@ func (m Model) renderCompose() string {
 			label = "› Title"
 		}
 		b.WriteString(m.theme.Muted.Render(label) + "\n")
-		cursor := ""
+		tb, ta := lineedit.Split(c.title, c.titleBack)
+		title := sanitizeSingleLine(tb) + sanitizeSingleLine(ta)
 		if c.field == 0 {
-			cursor = "▏"
+			title = sanitizeSingleLine(tb) + "▏" + sanitizeSingleLine(ta)
 		}
-		b.WriteString(sanitizeSingleLine(c.title) + cursor + m.theme.Muted.Render(fmt.Sprintf("  %d/%d", len([]rune(c.title)), maxTitleRunes)) + "\n\n")
+		b.WriteString(title + m.theme.Muted.Render(fmt.Sprintf("  %d/%d", len([]rune(c.title)), maxTitleRunes)) + "\n\n")
 	}
 	label := "Content"
 	if c.kind == composeComment || c.field == 1 {
 		label = "› Content"
 	}
 	b.WriteString(m.theme.Muted.Render(label+fmt.Sprintf("  %d/%d", len([]rune(c.body)), maxContentRunes)) + "\n")
-	cursor := ""
-	if c.kind == composeComment || c.field == 1 {
-		cursor = "▏"
+	bb, ba := lineedit.Split(c.body, c.bodyBack)
+	focused := c.kind == composeComment || c.field == 1
+	// Mark the cursor with a zero-width placeholder before wrapping, so it
+	// ends up on whichever wrapped line it lands in, then swap in the
+	// visible caret. The placeholder can't clash with typed text:
+	// sanitizeMultiline strips every control character. Wrapping leaves a
+	// column for the caret so a full line doesn't overflow the pane.
+	const mark = "\x00"
+	text := sanitizeMultiline(bb) + sanitizeMultiline(ba)
+	if focused {
+		text = sanitizeMultiline(bb) + mark + sanitizeMultiline(ba)
 	}
-	lines := wrapParagraphs(sanitizeMultiline(c.body)+cursor, w)
-	// Show the tail so what you're typing stays in view.
+	lines := wrapParagraphs(text, max(w-1, 1))
+	at := len(lines) - 1 // where the cursor is; the last line if it's lost
+	for i, l := range lines {
+		if strings.Contains(l, mark) {
+			at = i
+			lines[i] = strings.Replace(l, mark, "▏", 1)
+			break
+		}
+	}
+	// Scroll so the cursor stays in view: the tail while you type at the
+	// end, and the cursor's line at the top once you've moved above it.
 	_, ih := m.innerSize()
 	room := max(ih-10, 4)
 	if len(lines) > room {
-		lines = lines[len(lines)-room:]
+		start := min(len(lines)-room, at)
+		lines = lines[start : start+room]
 	}
 	b.WriteString(strings.Join(lines, "\n") + "\n\n")
 

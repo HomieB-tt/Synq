@@ -23,6 +23,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/github"
+	"github.com/HomieB-tt/synq/internal/lineedit"
 	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
 	"github.com/HomieB-tt/synq/internal/ws"
@@ -297,6 +298,7 @@ type Model struct {
 	// is open and capturing keystrokes.
 	commandMode  bool
 	commandInput string
+	commandBack  int    // cursor: runes from the end of commandInput (see lineedit)
 	commandMsg   string // last command result/error, shown until the next command
 
 	// themePicker* back the interactive `:theme` popup (see
@@ -438,6 +440,7 @@ type Model struct {
 	chatStore  *chat.Store
 	chatActive chat.ContactKey
 	chatInput  string
+	chatBack   int // cursor: runes from the end of chatInput (see lineedit)
 
 	// chatContacts remembers what `:chat <username>`'s server-side
 	// lookup learned about a contact (see handleChatResolveResult and
@@ -1002,7 +1005,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			threads := m.chatStore.Threads()
 			if len(threads) > 0 && m.chatListIndex >= 0 && m.chatListIndex < len(threads) {
 				m.chatActive = threads[m.chatListIndex]
-				m.chatInput = ""
+				m.chatInput, m.chatBack = "", 0
 			}
 			return m, nil
 		}
@@ -1033,7 +1036,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ":", "ctrl+p":
 		m.commandMode = true
-		m.commandInput = ""
+		m.commandInput, m.commandBack = "", 0
 		m.commandMsg = ""
 
 	case "?":
@@ -1054,14 +1057,14 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.commandMode = false
-		m.commandInput = ""
+		m.commandInput, m.commandBack = "", 0
 		return m, nil
 
 	case "enter":
 		result, quit, cmd := m.runCommand(strings.TrimSpace(m.commandInput))
 		m.commandMsg = result
 		m.commandMode = false
-		m.commandInput = ""
+		m.commandInput, m.commandBack = "", 0
 		if quit {
 			m.quitting = true
 			if m.wsClient != nil {
@@ -1072,20 +1075,22 @@ func (m Model) updateCommandMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
-	case "backspace":
-		if len(m.commandInput) > 0 {
-			m.commandInput = m.commandInput[:len(m.commandInput)-1]
-		}
+	}
+
+	// Cursor movement and deletion (arrows, Home/End, Backspace, Delete,
+	// Ctrl+W/U/K, word jumps). Backspace used to slice a byte here, which
+	// corrupted a multi-byte character; lineedit works in runes.
+	if text, back, ok := lineedit.Apply(m.commandInput, m.commandBack, msg.String(), false); ok {
+		m.commandInput, m.commandBack = text, back
 		return m, nil
 	}
 
-	// Any other printable key: append its text to the command buffer.
-	// msg.Text is the actual typed character(s) for a KeyPressMsg; this
-	// deliberately ignores non-text keys (arrows, function keys, etc.)
-	// rather than trying to enumerate every key that should NOT be
-	// appended.
+	// Any other printable key: insert its text at the cursor. msg.Text is
+	// the actual typed character(s) for a KeyPressMsg; this deliberately
+	// ignores non-text keys (function keys, etc.) rather than trying to
+	// enumerate every key that should NOT be inserted.
 	if msg.Text != "" {
-		m.commandInput += msg.Text
+		m.commandInput, m.commandBack = lineedit.Insert(m.commandInput, m.commandBack, sanitizeForTerminal(msg.Text))
 	}
 
 	return m, nil
@@ -1103,7 +1108,7 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// symmetric with how Esc closes the theme picker back to
 		// whatever was showing before, not all the way out of Profile.
 		m.chatActive = ""
-		m.chatInput = ""
+		m.chatInput, m.chatBack = "", 0
 		return m, nil
 
 	case "ctrl+p":
@@ -1111,7 +1116,7 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the message - and :send only makes sense inside a thread.
 		// The thread stays open underneath; the draft is kept.
 		m.commandMode = true
-		m.commandInput = ""
+		m.commandInput, m.commandBack = "", 0
 		m.commandMsg = ""
 		return m, nil
 
@@ -1121,17 +1126,19 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		m.scrollChat(-chatPageStep)
 		return m, nil
-	case "home":
+	// Home and End belong to the text cursor now (as in any text box);
+	// jumping to the oldest/newest message moved to Ctrl+Home/Ctrl+End.
+	case "ctrl+home":
 		m.scrollChat(m.chatStore.Len(m.chatActive))
 		return m, nil
-	case "end":
+	case "ctrl+end":
 		m.scrollChat(-m.chatStore.Len(m.chatActive))
 		return m, nil
 
 	case "enter":
 		body := strings.TrimSpace(m.chatInput)
 		if body == "" {
-			m.chatInput = ""
+			m.chatInput, m.chatBack = "", 0
 			return m, nil
 		}
 		if reason := m.keyBlockReason(m.chatActive); reason != "" {
@@ -1142,7 +1149,7 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.commandMsg = reason
 			return m, nil
 		}
-		m.chatInput = ""
+		m.chatInput, m.chatBack = "", 0
 		m.chatStore.Append(m.chatActive, chat.Message{
 			Body:     []byte(body),
 			At:       time.Now(),
@@ -1160,22 +1167,18 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// m itself, not just on shared state behind a pointer).
 		send := m.sendMessage(m.chatActive, []byte(body))
 		return m, send
+	}
 
-	case "backspace":
-		if len(m.chatInput) > 0 {
-			// Trim one rune, not one byte, so multi-byte UTF-8 input
-			// (emoji, accented characters) doesn't get corrupted into
-			// an invalid partial sequence - see commandInput's own
-			// backspace case just above for the simpler byte-slice
-			// version this deliberately doesn't copy.
-			r := []rune(m.chatInput)
-			m.chatInput = string(r[:len(r)-1])
-		}
+	// Editing happens at the cursor: arrows, Home/End, Backspace, Delete,
+	// Ctrl+W/U/K and word jumps are all lineedit's, in runes so a
+	// multi-byte character is never split.
+	if text, back, ok := lineedit.Apply(m.chatInput, m.chatBack, msg.String(), false); ok {
+		m.chatInput, m.chatBack = text, back
 		return m, nil
 	}
 
 	if msg.Text != "" {
-		m.chatInput += msg.Text
+		m.chatInput, m.chatBack = lineedit.Insert(m.chatInput, m.chatBack, sanitizeForTerminal(msg.Text))
 	}
 
 	return m, nil
@@ -2049,7 +2052,7 @@ func (m Model) githubStatusLabel() string {
 
 func (m Model) renderBottomBar() string {
 	if m.commandMode {
-		return m.theme.CommandBar.Render(":" + m.commandInput)
+		return m.commandBarLine()
 	}
 	if m.commandMsg != "" {
 		return m.theme.Warning.Render(m.commandMsg)

@@ -73,6 +73,9 @@ func (m Model) bottomLines() []string {
 	if m.commandMode {
 		return []string{m.commandBarLine()}
 	}
+	if s := m.transferStatus(width); s != "" {
+		return []string{m.theme.AccentText.Render(s)}
+	}
 	if m.commandMsg != "" {
 		wrapped := wrapToWidth(m.commandMsg, width)
 		if len(wrapped) > 4 {
@@ -193,10 +196,14 @@ func (m Model) chatListRow(contact chat.ContactKey, selected bool, w int) string
 	const stampW = 5 // "15:04"
 	name := truncateToWidth(m.chatContactLabel(contact), max(w/3, 8))
 	count := fmt.Sprintf(" (%d)", n)
+	unread := ""
+	if u := m.unreadIn(contact); u > 0 {
+		unread = fmt.Sprintf("  ● %d new", u)
+	}
 
 	// Whatever is left after the fixed parts goes to the preview; on a
 	// narrow pane there may be none, and the row is just name and time.
-	avail := w - lipgloss.Width(marker) - lipgloss.Width(name) - lipgloss.Width(count) - 2 - 1 - stampW
+	avail := w - lipgloss.Width(marker) - lipgloss.Width(name) - lipgloss.Width(count) - lipgloss.Width(unread) - 2 - 1 - stampW
 	preview := ""
 	if avail >= 6 {
 		text := sanitizeForTerminal(string(last.Body))
@@ -206,11 +213,14 @@ func (m Model) chatListRow(contact chat.ContactKey, selected bool, w int) string
 		preview = truncateToWidth(text, avail)
 	}
 
-	used := lipgloss.Width(marker) + lipgloss.Width(name) + lipgloss.Width(count)
+	used := lipgloss.Width(marker) + lipgloss.Width(name) + lipgloss.Width(count) + lipgloss.Width(unread)
 	var b strings.Builder
 	b.WriteString(markerStyle.Render(marker))
 	b.WriteString(base.Bold(true).Render(name))
 	b.WriteString(muted.Render(count))
+	if unread != "" {
+		b.WriteString(accent.Bold(true).Render(unread))
+	}
 	if preview != "" {
 		b.WriteString(base.Render("  "))
 		b.WriteString(muted.Render(preview))

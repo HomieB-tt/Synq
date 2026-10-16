@@ -298,6 +298,7 @@ func (m *Model) handleSealed(contact chat.ContactKey, body []byte) tea.Cmd {
 		Outgoing: false,
 	})
 	m.noteIncoming(contact)
+	m.noteUnread(contact, true)
 	return nil
 }
 

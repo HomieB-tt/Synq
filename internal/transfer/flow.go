@@ -55,6 +55,8 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 		return nil, fmt.Errorf("file is %d bytes; the limit is %d (100 MB after encryption)", st.Size(), MaxPlainBytes())
 	}
 
+	prog := progressFrom(ctx)
+
 	key, err := filecrypt.NewKey()
 	if err != nil {
 		return nil, err
@@ -75,7 +77,8 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 		os.Remove(tmp.Name())
 	}()
 
-	plainSize, hash, err := filecrypt.Encrypt(tmp, in, key)
+	prog.Start(PhaseEncrypting, st.Size())
+	plainSize, hash, err := filecrypt.Encrypt(tmp, prog.reader(in), key)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt: %w", err)
 	}
@@ -98,7 +101,8 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 	if err != nil {
 		return nil, fmt.Errorf("offer: %w", err)
 	}
-	if err := srv.UploadAttachment(ctx, token, offer.AttachmentID, tmp, blobSize); err != nil {
+	prog.Start(PhaseUploading, blobSize)
+	if err := srv.UploadAttachment(ctx, token, offer.AttachmentID, prog.reader(tmp), blobSize); err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
 	}
 	return &Sent{
@@ -122,6 +126,7 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 // exactly that; and it only becomes visible under its real name after
 // every check passed.
 func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer *Offer, key *[filecrypt.KeySize]byte, cache *Cache) (string, error) {
+	prog := progressFrom(ctx)
 	dir, err := cache.Dir(offer.AttachmentID)
 	if err != nil {
 		return "", err
@@ -173,7 +178,8 @@ func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer
 
 	// Read one byte past the expected size so an over-long stream is
 	// noticed instead of silently cut.
-	n, err := io.Copy(ct, io.LimitReader(body, want+1))
+	prog.Start(PhaseDownloading, want)
+	n, err := io.Copy(ct, io.LimitReader(prog.reader(body), want+1))
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("download: %w", err)
@@ -186,6 +192,7 @@ func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer
 		cancel()
 		return "", err
 	}
+	prog.Start(PhaseVerifying, 0)
 	got, err := filecrypt.HashOf(ct)
 	if err != nil {
 		cancel()
@@ -206,7 +213,8 @@ func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer
 		cancel()
 		return "", err
 	}
-	written, err := filecrypt.Decrypt(plain, ct, key)
+	prog.Start(PhaseDecrypting, want)
+	written, err := filecrypt.Decrypt(plain, prog.reader(ct), key)
 	if cerr := plain.Close(); err == nil {
 		err = cerr
 	}

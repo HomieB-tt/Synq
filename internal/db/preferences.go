@@ -48,6 +48,12 @@ const PrefBoot = "boot"
 // not been seen, so it is shown at the next launch.
 const PrefWelcomed = "welcomed"
 
+// PrefServerURL is the preferences key under which the synq-server
+// address chosen in the app (first-run prompt or `:server`) is stored.
+// Empty or unset means none was chosen, so the build-time default (if
+// any) applies.
+const PrefServerURL = "server_url"
+
 // PrefSaveDir is the preferences key under which the directory kept
 // files are saved to is stored (internal/app's `:savedir` command).
 // Unset means the user hasn't chosen one yet, and saving a received file

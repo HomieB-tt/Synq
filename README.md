@@ -129,6 +129,10 @@ Requires Go 1.23+.
 | `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
 | `q` / `Ctrl+C` | Quit |
 
+## Receiving messages
+
+Messages from your active nodes arrive on their own - you do not have to run `:chat` first, or have their thread open. Both of you do have to be online: synq-server never stores a message, so one sent to someone who is offline is simply not delivered. A thread with unread messages shows `● N new` in the Chat list, the Chat tab shows `(N new)` in the accent colour, and the bottom bar names the sender. Opening the thread clears them.
+
 ## Command palette
 
 Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `:node`, `:accept`, `:verify`, `:register`, `:name` - and a prompt opens asking for it (as `:theme` opens its picker), so there is no syntax to remember. Typing the argument yourself, as in `:send ~/report.pdf`, still works. Not sure what is available? `:commands` lists everything, and the Profile tab's `c` key opens the same list.
@@ -151,7 +155,7 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | `:send <path>` | Send a file (up to 100 MB) to the contact in the open chat - use `Ctrl+P` to reach the command palette from inside a thread. Only works between active nodes. The file is encrypted on your machine; synq-server never sees its contents, name or key. It stays available while you remain connected. |
 | `:files` | List files contacts have offered you. `Enter` downloads one and checks it; `v` opens it in your default application; `s` saves it to your save folder; `i` ignores it. Anything not saved is deleted when you quit. |
 | `:savedir [path]` | Show or set the folder `s` saves files to (created if missing; `~` works). Files are never overwritten. |
-| `:register <username>` | Register a username with `synq-server`, tied to this identity. **Permanent** - there's no rename endpoint. Only needed once; if you skipped the first-launch prompt, this is the same flow. Requires `SYNQ_SERVER_URL`. |
+| `:register <username>` | Register a username with `synq-server`, tied to this identity. **Permanent** - there's no rename endpoint. Only needed once; if you skipped the first-launch prompt, this is the same flow. Requires a configured server. |
 | `:login` | Manually re-authenticate after `:logout`, without restarting Synq. You won't normally need this - a registered identity logs in automatically and silently on every launch (see Configuration below). |
 | `:logout` | Revoke all of this account's sessions and disconnect. |
 | `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Messages go out end-to-end encrypted: a per-launch ephemeral handshake derives a session key (`DESIGN.md` sections 2-3), and the relay only ever sees ciphertext. The first lookup also pins their public key - a later change blocks sends until `:accept`. Chat history is session-only (see `DESIGN.md` section 4). Requires being logged in. |
@@ -159,14 +163,18 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | `:commands` | Open the command list - every command, grouped, with an explanation of what it does. `↑`/`↓` select, `Enter` runs it (commands that need an argument open a prompt for it), `Esc` closes. On the Profile tab, press `c`. |
 | `:welcome` | Show the getting-started guide again. It is shown once, on first launch. |
 | `:help` | Same as pressing `?` - the full key/command reference. |
+| `:server [address\|reset]` | Show or change the synq-server Synq connects to. Takes effect after a restart. |
+| `:ping` | Time a few requests to the server (first one includes connection setup) to tell a slow server from a slow link. |
 | `:boot on\|off` | Show (or stop showing) the startup checklist on the next launch. On by default; the splash itself is always skippable with any key. |
 | `:quit` | Same as pressing `q`. |
 
 ## Configuration
 
-**`SYNQ_SERVER_URL`** - the base URL of a `synq-server` deployment (e.g. `https://synq-server-production.up.railway.app`), used for both REST calls and the WS connection - the WS endpoint is derived from this automatically (same host, `/ws` path, scheme swapped to `ws`/`wss`). Without this set, Synq never attempts any server connection: guest Feed browsing, `:register`, `:login`, `:chat`, and the live WS connection are all unavailable, and the header's connection indicator stays "offline" permanently. There's no default to fall back to.
+**Server address** - Synq needs to know which `synq-server` to talk to. You normally don't have to do anything: release builds ship with a default server baked in, so you download, run, register and go. If your build has no default, Synq asks for the address on first run and remembers it. Change it any time with `:server <address>` (takes effect after a restart; `:server reset` clears it) and check the connection with `:ping`. The order of precedence is: the `SYNQ_SERVER_URL` environment variable, then the address saved in the app, then the built-in default. Without any of them Synq never attempts a server connection: guest Feed browsing, `:register`, `:login`, `:chat`, and the live WS connection are unavailable, and the header's connection indicator stays "offline".
 
-Logging in is automatic for a returning, already-registered identity: on every launch, right after your passphrase unlocks the vault, Synq silently tries to refresh your stored session, falling back to a full (but still silent - no prompt) re-login using your already-unlocked identity if that fails. You'll only ever see `:login` needed manually after an explicit `:logout`.
+**`SYNQ_SERVER_URL`** - optional override (e.g. `https://synq-server-production.up.railway.app`), used for both REST calls and the WS connection - the WS endpoint is derived from this automatically (same host, `/ws` path, scheme swapped to `ws`/`wss`).
+
+**Maintainers:** set the `SYNQ_DEFAULT_SERVER_URL` repository variable before tagging a release; GoReleaser links it into the binary (`-X main.defaultServerURL=...`). Local builds: `go build -ldflags "-X main.defaultServerURL=https://..." ./cmd/synq`.
 
 **`SYNQ_ALLOW_INSECURE_HTTP`** - Synq refuses to start with a cleartext `http://` `SYNQ_SERVER_URL` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`), because tokens would cross the network unencrypted. Set this to `1` to override on a network you trust, such as a home LAN.
 

@@ -28,3 +28,22 @@ func TestValidateServerURL(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveServerURLPriority(t *testing.T) {
+	tests := []struct {
+		env, saved, built string
+		wantURL, wantSrc  string
+	}{
+		{"https://env", "https://saved", "https://built", "https://env", "SYNQ_SERVER_URL"},
+		{"", "https://saved", "https://built", "https://saved", "saved"},
+		{"", "", "https://built", "https://built", "built-in"},
+		{"  ", " ", "", "", ""},
+		{"", "", "", "", ""},
+	}
+	for _, tc := range tests {
+		u, src := resolveServerURL(tc.env, tc.saved, tc.built)
+		if u != tc.wantURL || src != tc.wantSrc {
+			t.Errorf("resolveServerURL(%q,%q,%q) = %q,%q want %q,%q", tc.env, tc.saved, tc.built, u, src, tc.wantURL, tc.wantSrc)
+		}
+	}
+}

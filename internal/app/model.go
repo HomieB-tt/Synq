@@ -352,6 +352,17 @@ type Model struct {
 	composeOpen        bool
 	compose            composeState
 
+	// deferredFrames / resolvingSenders hold message frames from active
+	// nodes that this launch has not looked up yet, until the background
+	// lookup finishes (sender.go). unread counts incoming messages per
+	// thread that arrived while it was not on screen.
+	// transfers are the uploads and downloads running now, polled for
+	// progress (progress.go).
+	transfers        []*activeTransfer
+	deferredFrames   map[string][]ws.Event
+	resolvingSenders map[string]bool
+	unread           map[chat.ContactKey]int
+
 	// cmdListOpen is true while the command list (Profile tab `c`, or
 	// :commands) is showing, and cmdListIndex is the selected command's
 	// position in commandSpecs. promptOpen / prompt back the popup that a
@@ -627,10 +638,28 @@ func (m Model) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	if nm, ok := next.(Model); ok {
+		// Whatever just happened, a thread that is now on screen has
+		// been read.
+		nm.markViewedRead()
+		return nm, cmd
+	}
+	return next, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case bootTickMsg:
 		return m.handleBootTick()
+
+	case transferTickMsg:
+		// Redraw while a transfer runs; stop once none is.
+		if len(m.transfers) == 0 {
+			return m, nil
+		}
+		return m, transferTickCmd()
 
 	case githubDeviceCodeMsg:
 		return m.handleGitHubDeviceCode(msg)
@@ -697,6 +726,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fileSaveResultMsg:
 		return m.handleFileSaveResult(msg)
+
+	case pingResultMsg:
+		m.commandMsg = string(msg)
+		return m, nil
 
 	case wsConnectErrorMsg:
 		// Nothing the user can do about a malformed SYNQ_SERVER_URL
@@ -857,12 +890,12 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			// No `:chat` lookup on file for this sender, so there is
 			// neither a static key to derive with nor a thread to put
-			// anything in. Drop it silently: any synq-server user can
-			// send frames to any other, and announcing each unknown
-			// sender would hand them a spam vector for the command
-			// bar. Once the contact is resolved, their next frame
-			// (handshakes are resent on every send attempt) lands.
-			return m, waitForWSFrameCmd(m.wsClient)
+			// anything in. If they are an active node - the only people
+			// the server relays from - hold the frame and look them up
+			// in the background (sender.go); anyone else is dropped
+			// silently, because announcing each unknown sender would
+			// hand them a spam vector for the command bar.
+			return m, tea.Batch(waitForWSFrameCmd(m.wsClient), m.deferFromActiveNode(msg.event))
 		}
 		// Handshake or sealed message - messaging.go decides which,
 		// derives/opens accordingly, and answers when answering is
@@ -1529,6 +1562,15 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		m.helpOpen = true
 		return "", false, nil
 
+	case "server":
+		return m.serverCommand(fields[1:]), false, nil
+
+	case "ping":
+		if m.apiClient == nil {
+			return "No synq-server configured. Set one with :server <address>.", false, nil
+		}
+		return "Pinging the server...", false, pingCmd(m.apiClient)
+
 	case "boot":
 		if len(fields) == 1 {
 			state := "on"
@@ -1714,9 +1756,21 @@ func (m Model) renderTabBar() string {
 	var parts []string
 	for i, t := range allTabs {
 		label := fmt.Sprintf("%d %s", i+1, t)
-		if t == m.activeTab {
+		unread := 0
+		if t == tabChat {
+			unread = m.unreadTotal()
+			if unread > 0 {
+				label += fmt.Sprintf(" (%d new)", unread)
+			}
+		}
+		switch {
+		case t == m.activeTab:
 			parts = append(parts, m.theme.TabActive.Render(label))
-		} else {
+		case unread > 0:
+			// Unread messages: the label stands out from the other
+			// inactive tabs, in the theme's accent colour.
+			parts = append(parts, m.theme.TabInactive.Foreground(m.theme.Palette.Accent).Bold(true).Render(label))
+		default:
 			parts = append(parts, m.theme.TabInactive.Render(label))
 		}
 	}
@@ -2140,6 +2194,9 @@ func (m Model) githubStatusLabel() string {
 func (m Model) renderBottomBar() string {
 	if m.commandMode {
 		return m.commandBarLine()
+	}
+	if s := m.transferStatus(max(m.width, 20)); s != "" {
+		return m.theme.AccentText.Render(s)
 	}
 	if m.commandMsg != "" {
 		return m.theme.Warning.Render(m.commandMsg)

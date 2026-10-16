@@ -233,6 +233,7 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	// What this launch received is wiped now rather than left lying
 	// around for whoever logs in next.
 	m.nodes = nil
+	m.unread, m.deferredFrames, m.resolvingSenders = nil, nil, nil
 	m.nodesLoaded = false
 	m.nodesErr = ""
 	m.fileSession = ""
@@ -388,6 +389,14 @@ type chatResolveResultMsg struct {
 	username string
 	keys     *api.PublicKeys
 	err      error
+
+	// background marks a lookup Synq started itself because a message
+	// arrived from an active node it had not looked up yet (see
+	// sender.go), rather than one the user asked for with :chat. It must
+	// not open a thread or switch tabs. senderID is the user id the
+	// message came from, which the lookup has to agree with.
+	background bool
+	senderID   string
 }
 
 // resolveChatContactCmd looks up username's public keys so :chat can
@@ -411,6 +420,9 @@ func resolveChatContactCmd(apiClient *api.Client, accessToken, username string) 
 // opens either way, but a key that contradicts the pin opens it with
 // sends blocked, not silently trusted.
 func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
+	if msg.background {
+		return m.handleSenderResolved(msg)
+	}
 	if msg.err != nil {
 		if api.IsNotFound(msg.err) {
 			m.commandMsg = fmt.Sprintf("No such user: %s", msg.username)
@@ -420,61 +432,11 @@ func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea
 		return m, nil
 	}
 
-	if msg.keys.BoxPubKey == "" {
-		// See PublicKeys.BoxPubKey's doc comment: empty specifically
-		// means this user registered before synq-server tracked an
-		// X25519 key, not a lookup failure - nothing to retry here.
-		m.commandMsg = fmt.Sprintf("%s hasn't set up encrypted chat support yet.", msg.username)
+	contact, outcome, fail := m.acceptResolved(msg)
+	if fail != "" {
+		m.commandMsg = fail
 		return m, nil
 	}
-
-	contactPub, err := decodeHexBoxPublicKey(msg.keys.BoxPubKey)
-	if err != nil {
-		m.commandMsg = fmt.Sprintf("%s has an invalid public key on file: %v", msg.username, err)
-		return m, nil
-	}
-
-	// The box key came from synq-server, which isn't trusted, and the
-	// fingerprint :verify shows covers only the identity key. The
-	// identity key's signature over the box key is what ties the two
-	// together; without a valid one the key could have been swapped, so
-	// it is neither pinned nor opened as a thread.
-	if err := crypto.VerifyBoxKeyBinding(msg.keys.PubKey, msg.username, msg.keys.BoxPubKey, msg.keys.BoxKeySig); err != nil {
-		if errors.Is(err, crypto.ErrBoxKeyUnsigned) {
-			m.commandMsg = fmt.Sprintf("%s's encryption key isn't signed yet - they need to update Synq and log in once before you can chat.", msg.username)
-		} else {
-			m.commandMsg = fmt.Sprintf("%s's encryption key signature doesn't verify - not trusting that key. The server may be serving a substituted one.", msg.username)
-		}
-		return m, nil
-	}
-
-	if msg.keys.UserID == "" {
-		// Both wire directions speak in this id - EncodeSend's
-		// recipient and an inbound frame's sender - so a lookup that
-		// didn't return one leaves a thread nobody could ever send to
-		// or receive from. A server old enough to omit it (API.md's
-		// user_id) can't be talked to by this client at all; better to
-		// say so now than open a thread that silently goes nowhere.
-		m.commandMsg = fmt.Sprintf("synq-server returned no user id for %s - this client can't message them.", msg.username)
-		return m, nil
-	}
-
-	contact := chat.NewContactKey(contactPub)
-
-	// Trust-on-first-use (DESIGN.md section 2), before anything is
-	// opened: a first sighting pins the keys, an agreement stays
-	// quiet, and a contradiction is stashed (not adopted) so the
-	// thread below can open with sends blocked rather than encrypting
-	// to a key this device never vouched for. A pin that can't be
-	// read or written fails the lookup entirely - see pinFailed.
-	outcome, err := m.applyPin(msg.username, msg.keys)
-	if outcome == pinFailed {
-		m.commandMsg = fmt.Sprintf("Couldn't check %s's pinned key: %v - not opening the thread until that works.",
-			msg.username, err)
-		return m, nil
-	}
-
-	m.rememberContact(contact, msg.username, msg.keys.UserID)
 
 	isNew := !m.chatStore.HasThread(contact)
 	m.activeTab = tabChat
@@ -494,4 +456,66 @@ func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea
 		m.commandMsg = fmt.Sprintf("Opened your thread with %s.", msg.username)
 	}
 	return m, nil
+}
+
+// acceptResolved is everything that must hold before a looked-up user may
+// be talked to: usable, signed keys, a user id, and DESIGN.md section 2's
+// trust-on-first-use check - after which the contact is remembered. It
+// opens nothing and switches no tab, so both `:chat` (which then opens the
+// thread) and an incoming message from an unlooked-up node (which must
+// not steal the screen) can share it.
+//
+// On a refusal it returns the message to show and fail is non-empty; the
+// contact was not remembered.
+func (m *Model) acceptResolved(msg chatResolveResultMsg) (contact chat.ContactKey, outcome pinOutcome, fail string) {
+	if msg.keys.BoxPubKey == "" {
+		// See PublicKeys.BoxPubKey's doc comment: empty specifically
+		// means this user registered before synq-server tracked an
+		// X25519 key, not a lookup failure - nothing to retry here.
+		return "", 0, fmt.Sprintf("%s hasn't set up encrypted chat support yet.", msg.username)
+	}
+
+	contactPub, err := decodeHexBoxPublicKey(msg.keys.BoxPubKey)
+	if err != nil {
+		return "", 0, fmt.Sprintf("%s has an invalid public key on file: %v", msg.username, err)
+	}
+
+	// The box key came from synq-server, which isn't trusted, and the
+	// fingerprint :verify shows covers only the identity key. The
+	// identity key's signature over the box key is what ties the two
+	// together; without a valid one the key could have been swapped, so
+	// it is neither pinned nor opened as a thread.
+	if err := crypto.VerifyBoxKeyBinding(msg.keys.PubKey, msg.username, msg.keys.BoxPubKey, msg.keys.BoxKeySig); err != nil {
+		if errors.Is(err, crypto.ErrBoxKeyUnsigned) {
+			return "", 0, fmt.Sprintf("%s's encryption key isn't signed yet - they need to update Synq and log in once before you can chat.", msg.username)
+		}
+		return "", 0, fmt.Sprintf("%s's encryption key signature doesn't verify - not trusting that key. The server may be serving a substituted one.", msg.username)
+	}
+
+	if msg.keys.UserID == "" {
+		// Both wire directions speak in this id - EncodeSend's
+		// recipient and an inbound frame's sender - so a lookup that
+		// didn't return one leaves a thread nobody could ever send to
+		// or receive from. A server old enough to omit it (API.md's
+		// user_id) can't be talked to by this client at all; better to
+		// say so now than open a thread that silently goes nowhere.
+		return "", 0, fmt.Sprintf("synq-server returned no user id for %s - this client can't message them.", msg.username)
+	}
+
+	contact = chat.NewContactKey(contactPub)
+
+	// Trust-on-first-use (DESIGN.md section 2), before anything is
+	// opened: a first sighting pins the keys, an agreement stays
+	// quiet, and a contradiction is stashed (not adopted) so the
+	// thread can open with sends blocked rather than encrypting to a
+	// key this device never vouched for. A pin that can't be read or
+	// written fails the lookup entirely - see pinFailed.
+	outcome, err = m.applyPin(msg.username, msg.keys)
+	if outcome == pinFailed {
+		return "", outcome, fmt.Sprintf("Couldn't check %s's pinned key: %v - not opening the thread until that works.",
+			msg.username, err)
+	}
+
+	m.rememberContact(contact, msg.username, msg.keys.UserID)
+	return contact, outcome, ""
 }

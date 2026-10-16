@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -125,7 +123,7 @@ func run() error {
 	}
 	defer ks.Close()
 
-	apiClient, err := newAPIClientFromEnv()
+	apiClient, err := newAPIClient(ks)
 	if err != nil {
 		return err
 	}
@@ -136,6 +134,12 @@ func run() error {
 	}
 
 	if !has {
+		if apiClient == nil {
+			apiClient, err = askServerURL(ks)
+			if err != nil {
+				return err
+			}
+		}
 		return runLanding(ks, apiClient)
 	}
 
@@ -149,56 +153,104 @@ func run() error {
 	return app.Run(id, ks, session)
 }
 
-// newAPIClientFromEnv builds the synq-server REST client from
-// SYNQ_SERVER_URL, or returns nil if it isn't set - nil propagates
+// defaultServerURL is the synq-server a release build talks to when the
+// user hasn't chosen one. It is empty in a plain `go build` and is set
+// for release binaries at link time:
+//
+//	-ldflags "-X main.defaultServerURL=https://synq.example.com"
+//
+// (see .goreleaser.yaml). It is the lowest-priority source: see
+// resolveServerURL.
+var defaultServerURL = ""
+
+// resolveServerURL picks the server to use and says where it came from.
+// Priority, highest first:
+//
+//  1. SYNQ_SERVER_URL - a developer / power-user override
+//  2. the address saved from the app (landing prompt or `:server`)
+//  3. the build-time default
+//
+// It returns "" when none is set.
+func resolveServerURL(env, saved, built string) (raw, source string) {
+	switch {
+	case strings.TrimSpace(env) != "":
+		return strings.TrimSpace(env), "SYNQ_SERVER_URL"
+	case strings.TrimSpace(saved) != "":
+		return strings.TrimSpace(saved), "saved"
+	case strings.TrimSpace(built) != "":
+		return strings.TrimSpace(built), "built-in"
+	}
+	return "", ""
+}
+
+// newAPIClient builds the synq-server REST client from the sources in
+// resolveServerURL, or returns nil if none is set - nil propagates
 // through runLanding/establishSession/app.Session as "no server
-// configured", the same "stays off, zero behavior change" default
-// every other optional integration here (SYNQ_GITHUB_CLIENT_ID,
-// previously this same env var when it only drove the WS connection
-// directly) already follows.
+// configured", the same "stays off" default every other optional
+// integration follows.
+//
+// A bad SYNQ_SERVER_URL is an error (the user typed it this launch). A
+// bad saved or built-in value is skipped instead, so a typo can never
+// lock someone out of the app: they can still fix it with `:server`.
 //
 // It refuses a cleartext http:// URL for any non-loopback host (see
-// validateServerURL): access tokens, refresh tokens and all traffic
+// api.ValidateServerURL): access tokens, refresh tokens and all traffic
 // metadata would otherwise cross the network unencrypted.
-func newAPIClientFromEnv() (*api.Client, error) {
-	baseURL := os.Getenv("SYNQ_SERVER_URL")
-	if baseURL == "" {
-		return nil, nil
-	}
-	if err := validateServerURL(baseURL, os.Getenv("SYNQ_ALLOW_INSECURE_HTTP") == "1"); err != nil {
-		return nil, err
-	}
-	return api.NewClient(baseURL), nil
-}
+func newAPIClient(ks *db.KeyStore) (*api.Client, error) {
+	allowInsecure := os.Getenv("SYNQ_ALLOW_INSECURE_HTTP") == "1"
 
-// validateServerURL accepts https:// URLs, and http:// only for
-// loopback hosts (localhost, 127.0.0.0/8, ::1) used in local
-// development. allowInsecure (SYNQ_ALLOW_INSECURE_HTTP=1) is an
-// explicit override for a trusted network such as a home LAN.
-func validateServerURL(raw string, allowInsecure bool) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("SYNQ_SERVER_URL is invalid: %w", err)
-	}
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		if allowInsecure || isLoopbackHost(u.Hostname()) {
-			return nil
+	if env := strings.TrimSpace(os.Getenv("SYNQ_SERVER_URL")); env != "" {
+		if err := api.ValidateServerURL(env, allowInsecure); err != nil {
+			return nil, fmt.Errorf("SYNQ_SERVER_URL: %w", err)
 		}
-		return fmt.Errorf("SYNQ_SERVER_URL uses cleartext http:// for %q, which would send your tokens unencrypted; use https://, or set SYNQ_ALLOW_INSECURE_HTTP=1 if you trust this network", u.Hostname())
-	default:
-		return fmt.Errorf("SYNQ_SERVER_URL must start with https:// (or http://localhost for development), got scheme %q", u.Scheme)
+		return api.NewClient(env), nil
+	}
+	saved, _ := ks.LoadPreference(db.PrefServerURL)
+	for _, cand := range []string{saved, defaultServerURL} {
+		cand = strings.TrimSpace(cand)
+		if cand != "" && api.ValidateServerURL(cand, allowInsecure) == nil {
+			return api.NewClient(cand), nil
+		}
+	}
+	return nil, nil
+}
+
+// askServerURL is the first-run question for a build with no built-in
+// server: where is it? A blank answer skips it (guest/offline use), and
+// a valid answer is saved so it is never asked again.
+func askServerURL(ks *db.KeyStore) (*api.Client, error) {
+	allowInsecure := os.Getenv("SYNQ_ALLOW_INSECURE_HTTP") == "1"
+	fmt.Println()
+	fmt.Println("Synq needs the address of a synq-server to chat, post and share files.")
+	for {
+		fmt.Print("Server address (e.g. https://synq.example.com), or Enter to skip: ")
+		line, err := readLine()
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			fmt.Println("Skipped. You can set it later with :server <address> inside Synq.")
+			return nil, nil
+		}
+		if !strings.Contains(line, "://") {
+			line = "https://" + line
+		}
+		if err := api.ValidateServerURL(line, allowInsecure); err != nil {
+			fmt.Println(err)
+			continue
+		}
+		if err := ks.SavePreference(db.PrefServerURL, line); err != nil {
+			fmt.Printf("Couldn't save the address (%v); using it for this session only.\n", err)
+		}
+		return api.NewClient(line), nil
 	}
 }
 
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+// validateServerURL is kept as the package-local name for the shared
+// check in internal/api.
+func validateServerURL(raw string, allowInsecure bool) error {
+	return api.ValidateServerURL(raw, allowInsecure)
 }
 
 // synqBanner is the block-letter wordmark drawn above the landing

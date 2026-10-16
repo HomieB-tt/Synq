@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -225,6 +226,7 @@ type fileSendResultMsg struct {
 	sent         *transfer.Sent
 	err          error
 	unauthorized bool
+	tr           *activeTransfer
 }
 
 // sendFileCmd starts `:send <path>` for the open thread's contact.
@@ -256,15 +258,18 @@ func (m *Model) sendFileCmd(path string) (string, tea.Cmd) {
 
 	client, token, session, contact := m.apiClient, m.accessToken, m.fileSession, m.chatActive
 	scratch := cache.Root()
-	return "Encrypting and uploading…", func() tea.Msg {
+	tr, tick := m.beginTransfer("", filepath.Base(path), true)
+	return "Encrypting and uploading…", tea.Batch(tick, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), fileTransferTimeout)
 		defer cancel()
+		ctx = transfer.WithProgress(ctx, tr.prog)
 		sent, err := transfer.SendFile(ctx, client, token, session, to, path, scratch)
-		return fileSendResultMsg{contact: contact, sent: sent, err: err, unauthorized: api.IsUnauthorized(err)}
-	}
+		return fileSendResultMsg{contact: contact, sent: sent, err: err, unauthorized: api.IsUnauthorized(err), tr: tr}
+	})
 }
 
 func (m Model) handleFileSendResult(msg fileSendResultMsg) (tea.Model, tea.Cmd) {
+	m.endTransfer(msg.tr)
 	if msg.err != nil {
 		switch {
 		case msg.unauthorized:
@@ -322,6 +327,7 @@ func (m *Model) receiveOffer(contact chat.ContactKey, body []byte) {
 		At:   time.Now(),
 	})
 	m.noteIncoming(contact)
+	m.noteUnread(contact, false) // the notice below says it better
 	m.commandMsg = fmt.Sprintf("%s offered you %s (%s) - :files", label, offer.Name, humanSize(offer.Size))
 }
 
@@ -341,6 +347,7 @@ type fileReceiveResultMsg struct {
 	path         string
 	err          error
 	unauthorized bool
+	tr           *activeTransfer
 }
 
 func (m *Model) downloadCmd(e *fileEntry) tea.Cmd {
@@ -362,15 +369,18 @@ func (m *Model) downloadCmd(e *fileEntry) tea.Cmd {
 
 	client, token, session := m.apiClient, m.accessToken, m.fileSession
 	offer, key := e.offer, e.key
-	return func() tea.Msg {
+	tr, tick := m.beginTransfer(offer.AttachmentID, offer.Name, false)
+	return tea.Batch(tick, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), fileTransferTimeout)
 		defer cancel()
+		ctx = transfer.WithProgress(ctx, tr.prog)
 		path, err := transfer.ReceiveFile(ctx, client, token, session, offer, key, cache)
-		return fileReceiveResultMsg{id: offer.AttachmentID, path: path, err: err, unauthorized: api.IsUnauthorized(err)}
-	}
+		return fileReceiveResultMsg{id: offer.AttachmentID, path: path, err: err, unauthorized: api.IsUnauthorized(err), tr: tr}
+	})
 }
 
 func (m Model) handleFileReceiveResult(msg fileReceiveResultMsg) (tea.Model, tea.Cmd) {
+	m.endTransfer(msg.tr)
 	e := m.entryByID(msg.id)
 	if e == nil || e.state == fileIgnored {
 		// Gone or ignored mid-download: don't resurrect it.
@@ -599,7 +609,7 @@ func (m Model) renderFilePicker() string {
 	rows := make([]row, 0, len(m.files))
 	for i, e := range m.files {
 		text := fmt.Sprintf("%s  %s  from %s  [%s]",
-			truncateRunes(e.offer.Name, 36), humanSize(e.offer.Size), truncateRunes(e.from, 16), e.state.label())
+			truncateRunes(e.offer.Name, 36), humanSize(e.offer.Size), truncateRunes(e.from, 16), m.fileStateLabel(e))
 		if i == m.filePickerIndex {
 			rows = append(rows, row{text: "› " + text, highlight: true})
 		} else {

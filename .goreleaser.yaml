@@ -19,6 +19,10 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+      # Bake in the default synq-server so users only download, run and
+      # register. Set the SYNQ_DEFAULT_SERVER_URL repository variable;
+      # when it is unset the binary asks for a server on first run.
+      - -X main.defaultServerURL={{ envOrDefault "SYNQ_DEFAULT_SERVER_URL" "" }}
 
 archives:
   - formats:

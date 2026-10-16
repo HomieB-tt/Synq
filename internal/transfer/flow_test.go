@@ -287,3 +287,47 @@ func TestReceiveStopsAtEachServerFailure(t *testing.T) {
 		}
 	}
 }
+
+// A UI is watching: sending and receiving must report each phase and
+// finish with the byte counts the protocol implies.
+func TestTransfersReportProgress(t *testing.T) {
+	data := bytes.Repeat([]byte{0x5A}, 3*filecrypt.ChunkSize+7)
+	srv := &fakeServer{}
+	cache, err := NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sendProg := NewProgress()
+	sent, err := SendFile(WithProgress(context.Background(), sendProg), srv, "tok", "ses-1", "usr-2",
+		writeFile(t, "big.bin", data), cache.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph, done, total := sendProg.Snapshot()
+	want := filecrypt.CiphertextSize(int64(len(data)))
+	if ph != PhaseUploading || done != want || total != want {
+		t.Fatalf("after send: %v %d/%d, want uploading %d/%d", ph, done, total, want, want)
+	}
+
+	body, _ := EncodeOffer(sent.AttachmentID, sent.Name, sent.Size, sent.Hash, sent.Key)
+	offer, key, _ := DecodeOffer(body)
+
+	recvProg := NewProgress()
+	if _, err := ReceiveFile(WithProgress(context.Background(), recvProg), srv, "tok", "ses-2", offer, key, cache); err != nil {
+		t.Fatal(err)
+	}
+	ph, done, total = recvProg.Snapshot()
+	if ph != PhaseDecrypting || done != want || total != want {
+		t.Fatalf("after receive: %v %d/%d, want decrypting %d/%d", ph, done, total, want, want)
+	}
+}
+
+// No Progress in the context is the ordinary case and must change nothing.
+func TestTransfersWorkWithoutProgress(t *testing.T) {
+	srv := &fakeServer{}
+	offer, key, cache := sendThenOffer(t, srv, []byte("hi"), "a.txt")
+	if _, err := ReceiveFile(context.Background(), srv, "t", "s", offer, key, cache); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,5 +257,66 @@ func TestValidateSaveDir(t *testing.T) {
 	got, err = ValidateSaveDir("~/Downloads/synq")
 	if err != nil || got != filepath.Join(base, "Downloads", "synq") {
 		t.Errorf("~ expansion: %q, %v", got, err)
+	}
+}
+
+// --- progress ---
+
+func TestProgressTracksPhasesAndIsNilSafe(t *testing.T) {
+	var none *Progress
+	none.Start(PhaseUploading, 10) // must not panic
+	none.Add(5)
+	if ph, d, tot := none.Snapshot(); ph != PhaseIdle || d != 0 || tot != 0 {
+		t.Fatalf("nil snapshot = %v %d %d", ph, d, tot)
+	}
+	if none.Fraction() != -1 {
+		t.Fatal("nil fraction should be unknown")
+	}
+
+	p := NewProgress()
+	p.Start(PhaseUploading, 200)
+	p.Add(50)
+	if ph, d, tot := p.Snapshot(); ph != PhaseUploading || d != 50 || tot != 200 {
+		t.Fatalf("snapshot = %v %d %d", ph, d, tot)
+	}
+	if f := p.Fraction(); f != 0.25 {
+		t.Fatalf("fraction = %v", f)
+	}
+	p.Start(PhaseVerifying, 0) // a new phase resets the count; no total means unknown
+	if _, d, _ := p.Snapshot(); d != 0 || p.Fraction() != -1 {
+		t.Fatal("Start should reset done and allow an unknown total")
+	}
+	p.Start(PhaseDecrypting, 10)
+	p.Add(99) // overshoot is clamped, never > 100%
+	if p.Fraction() != 1 {
+		t.Fatalf("fraction = %v", p.Fraction())
+	}
+}
+
+func TestProgressReaderCountsWhatIsRead(t *testing.T) {
+	p := NewProgress()
+	p.Start(PhaseDownloading, 1000)
+	r := p.reader(strings.NewReader(strings.Repeat("x", 1000)))
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, d, _ := p.Snapshot(); d != 1000 {
+		t.Fatalf("counted %d bytes, want 1000", d)
+	}
+	// A nil Progress hands the reader straight back.
+	src := strings.NewReader("abc")
+	if (*Progress)(nil).reader(src) != io.Reader(src) {
+		t.Fatal("nil Progress should not wrap the reader")
+	}
+}
+
+func TestPhaseNames(t *testing.T) {
+	for p, want := range map[Phase]string{
+		PhaseEncrypting: "encrypting", PhaseUploading: "uploading", PhaseDownloading: "downloading",
+		PhaseVerifying: "verifying", PhaseDecrypting: "decrypting", PhaseIdle: "starting",
+	} {
+		if p.String() != want {
+			t.Errorf("%d = %q, want %q", p, p.String(), want)
+		}
 	}
 }

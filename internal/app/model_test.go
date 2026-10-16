@@ -147,7 +147,12 @@ func TestHandleWSFrameRoutesMessageIntoTheContactThread(t *testing.T) {
 	if len(msgs) != 1 || string(msgs[0].Body) != "wired" {
 		t.Fatalf("thread = %d messages, want the routed one", len(msgs))
 	}
-	if out != "" {
-		t.Errorf("commandMsg = %q, want untouched for a frame that opened cleanly", out)
+	// The thread is not on screen, so the message counts as unread and
+	// the user is told once (sender.go noteUnread).
+	if want := "New message from alice - press 3 for Chat"; out != want {
+		t.Errorf("commandMsg = %q, want %q", out, want)
+	}
+	if n := got.unreadIn(contact); n != 1 {
+		t.Errorf("unread = %d, want 1", n)
 	}
 }

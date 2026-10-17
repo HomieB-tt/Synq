@@ -79,7 +79,7 @@ The certificate and App Store Connect API key must belong to an Apple Developer 
 
 Synq gives you four core views, all reachable without touching a mouse:
 
-- **Feed** — a global stream of posts tagged `[PROJECT]`, `[HIRING]`, or `[GENERAL]`. Write posts in the TUI (`p` or `:post`) and open your `$EDITOR` mid-draft with `Ctrl+O`. *(Piping command output straight into a post, `cat error.log | synq post`, is designed but not built yet.)*
+- **Feed** — a global stream of posts tagged `[PROJECT]`, `[HIRING]`, or `[GENERAL]`. Write posts in the TUI (`p` or `:post`) and open your `$EDITOR` mid-draft with `Ctrl+O`. Pipe command output straight into a post without opening the TUI: `tail -n 50 error.log | synq post -c project -t "build broke"` (escape sequences are stripped first; see below).
 - **Nodes** — your developer network. Connections move through `PENDING`, `ACTIVE`, and `BLOCKED` states.
 - **Chat** — ephemeral, end-to-end encrypted direct messages. The server relays bytes; it never sees plaintext.
 - **Profile** — your identity, including a local display name (`:name`, see below), GitHub verification status (`[✓ GitHub: @username]`) and the active local Git repository, shown for context as you work.
@@ -215,3 +215,13 @@ synq/
 ## License
 
 This project is under a **Proprietory Software** license - see the [LICENSE](LICENSE) file for details.
+
+## Posting from a pipe
+
+```
+cat error.log | synq post [-c project|hiring|general] [-t title]
+```
+
+`synq post` reads stdin, posts it to the Feed as you, prints the new post's ID on stdout and exits; the TUI never starts. Your passphrase is asked for on the terminal (not stdin, which carries the post), so it needs a terminal to be available. Without `-t`, the title is the first line of the input. Posts are limited to 10000 characters (title: 120), so for long output keep the part that matters, e.g. `tail -n 50`.
+
+Everything piped in is sanitized first: ANSI colour/cursor sequences, OSC titles and links, and other control characters are removed, carriage-return progress bars keep their last state, and tabs become spaces. Piped text cannot drive your terminal or anyone else's.

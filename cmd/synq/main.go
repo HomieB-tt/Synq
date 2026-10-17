@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/app"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/db"
+	"github.com/HomieB-tt/synq/internal/postcli"
 )
 
 // sessionTimeout bounds every network call main.go makes before the
@@ -30,6 +32,19 @@ import (
 const sessionTimeout = 15 * time.Second
 
 func main() {
+	// `synq post` is a pipe-friendly subcommand: it never starts the TUI.
+	if len(os.Args) > 1 && os.Args[1] == "post" {
+		if err := runPost(os.Args[2:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				fmt.Print(postcli.Usage)
+				return
+			}
+			fmt.Fprintln(os.Stderr, "synq post:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// --forget runs before the store is opened: it's the escape hatch
 	// for someone who has permanently lost their passphrase (DESIGN.md
 	// section 1 - there is no recovery), and it must work from exactly
@@ -682,13 +697,22 @@ func readLine() (string, error) {
 	return line, nil
 }
 
+// passphraseInput, when set, is where promptPassphrase reads from
+// instead of stdin. `synq post` sets it to the controlling terminal,
+// because its stdin is the pipe carrying the post.
+var passphraseInput *os.File
+
 // promptPassphrase reads a line of input from the terminal without
 // echoing it. Falls back to a visible bufio read when stdin isn't an
 // interactive terminal (e.g. piped input during scripted testing).
 func promptPassphrase(label string) ([]byte, error) {
 	fmt.Fprint(os.Stderr, label)
 
-	fd := int(os.Stdin.Fd())
+	in := os.Stdin
+	if passphraseInput != nil {
+		in = passphraseInput
+	}
+	fd := int(in.Fd())
 	if term.IsTerminal(fd) {
 		pw, err := term.ReadPassword(fd)
 		fmt.Fprintln(os.Stderr)
@@ -698,7 +722,7 @@ func promptPassphrase(label string) ([]byte, error) {
 		return pw, nil
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, fmt.Errorf("read passphrase: %w", err)

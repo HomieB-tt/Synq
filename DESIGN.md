@@ -71,7 +71,7 @@ This document captures the architectural decisions made for the `synq` client du
 
 **Decision:** Sanitize before storing or rendering.
 
-- Content piped into `synq post` (e.g. `cat error.log | synq post`) is stripped of raw ANSI/control escape sequences before it touches storage or the Bubble Tea render loop.
+- Content piped into `synq post` (e.g. `cat error.log | synq post`) is stripped of raw ANSI/control escape sequences before it touches storage or the Bubble Tea render loop. Implemented by `internal/sanitize` (whole CSI/OSC/DCS/APC sequences, C1 forms, control and bidi-override characters) and `internal/postcli`; `synq post` reads its passphrase from the controlling terminal because stdin is the pipe.
 - Syntax highlighting via Chroma is applied to the sanitized text, not the raw input — piped content should never be able to manipulate the terminal or the TUI's rendering state.
 
 ## 7. Theming (Lip Gloss v2)

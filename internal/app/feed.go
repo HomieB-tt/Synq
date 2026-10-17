@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/HomieB-tt/synq/internal/api"
+	"github.com/HomieB-tt/synq/internal/db"
 	"github.com/HomieB-tt/synq/internal/lineedit"
 )
 
@@ -95,8 +96,14 @@ func (m Model) handleFeedLoaded(msg feedLoadedMsg) (tea.Model, tea.Cmd) {
 		m.feedPosts = append(m.feedPosts, msg.posts...)
 	}
 	m.feedMore = len(msg.posts) == feedPageSize
-	if m.feedIndex >= len(m.feedPosts) {
-		m.feedIndex = max(len(m.feedPosts)-1, 0)
+	if n := len(m.feedVisible()); m.feedIndex >= n {
+		m.feedIndex = max(n-1, 0)
+	}
+	// The first time the Feed ever loads there is no "last looked" to
+	// compare with, so everything on it counts as seen; only what
+	// arrives after this can be new.
+	if m.feedSeenAt.IsZero() {
+		m.markFeedSeen()
 	}
 	return m, nil
 }
@@ -138,10 +145,101 @@ func (m Model) handleCommentsLoaded(msg commentsLoadedMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m *Model) openPost() *api.Post {
-	if m.feedIndex < 0 || m.feedIndex >= len(m.feedPosts) {
+	vis := m.feedVisible()
+	if m.feedIndex < 0 || m.feedIndex >= len(vis) {
 		return nil
 	}
-	return &m.feedPosts[m.feedIndex]
+	return &vis[m.feedIndex]
+}
+
+// --- filtering and "new" ---
+
+// feedFilters are the category filters in the order [ and ] cycle
+// through them; "" is "all".
+var feedFilters = []string{"", api.CategoryProject, api.CategoryHiring, api.CategoryGeneral}
+
+// feedFilterLabel is how a filter is named in the bar and messages.
+func feedFilterLabel(f string) string {
+	switch f {
+	case api.CategoryProject:
+		return "Project"
+	case api.CategoryHiring:
+		return "Hiring"
+	case api.CategoryGeneral:
+		return "General"
+	}
+	return "All"
+}
+
+// feedVisible is the posts the list shows: all of them, or just the
+// selected category. The filter is applied to the posts already fetched,
+// so there is nothing to gain from asking the server again.
+func (m Model) feedVisible() []api.Post {
+	if m.feedFilter == "" {
+		return m.feedPosts
+	}
+	var out []api.Post
+	for _, p := range m.feedPosts {
+		if p.Category == m.feedFilter {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// cycleFeedFilter moves to the next (+1) or previous (-1) category,
+// wrapping, and puts the selection back at the top of the new list.
+func (m *Model) cycleFeedFilter(dir int) {
+	cur := 0
+	for i, f := range feedFilters {
+		if f == m.feedFilter {
+			cur = i
+		}
+	}
+	m.feedFilter = feedFilters[((cur+dir)%len(feedFilters)+len(feedFilters))%len(feedFilters)]
+	m.feedIndex = 0
+}
+
+// feedIsNew reports whether a post was created after the user last
+// looked at the Feed. With no baseline yet, or a timestamp that doesn't
+// parse, nothing is new - a missing marker is better than a wrong one.
+func (m Model) feedIsNew(p api.Post) bool {
+	if m.feedSeenAt.IsZero() {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339Nano, p.CreatedAt)
+	return err == nil && t.After(m.feedSeenAt)
+}
+
+// feedNewIn is how many of the given posts are new.
+func (m Model) feedNewIn(posts []api.Post) int {
+	n := 0
+	for _, p := range posts {
+		if m.feedIsNew(p) {
+			n++
+		}
+	}
+	return n
+}
+
+// markFeedSeen records that the user has now seen everything fetched so
+// far, clearing the new markers, and remembers it for next launch. It
+// runs when you leave the Feed tab and when you quit (see Update), and
+// once at the first-ever load to set the baseline. Saving is best-effort.
+func (m *Model) markFeedSeen() {
+	var newest time.Time
+	for _, p := range m.feedPosts {
+		if t, err := time.Parse(time.RFC3339Nano, p.CreatedAt); err == nil && t.After(newest) {
+			newest = t
+		}
+	}
+	if !newest.After(m.feedSeenAt) {
+		return
+	}
+	m.feedSeenAt = newest
+	if m.store != nil {
+		_ = m.store.SavePreference(db.PrefFeedSeen, newest.UTC().Format(time.RFC3339Nano))
+	}
 }
 
 // --- key handling on the Feed tab ---
@@ -174,8 +272,14 @@ func (m Model) updateFeedKeys(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd,
 		return m, nil, false
 	}
 
-	n := len(m.feedPosts)
+	n := len(m.feedVisible())
 	switch key {
+	case "]":
+		m.cycleFeedFilter(1)
+		return m, nil, true
+	case "[":
+		m.cycleFeedFilter(-1)
+		return m, nil, true
 	case "up", "k":
 		if n > 0 {
 			m.feedIndex = (m.feedIndex + n - 1) % n
@@ -554,37 +658,51 @@ func (m Model) renderFeed() string {
 	}
 
 	var b strings.Builder
+	vis := m.feedVisible()
 	if len(m.feedPosts) == 0 {
 		b.WriteString("The Feed is empty. Be the first: press p (or :post) to write one.\n")
 	}
 	if m.accessToken == "" {
 		b.WriteString(m.theme.Muted.Render("Browsing as a guest - authors show as \"node\". Log in to see who wrote what and to post.") + "\n\n")
 	}
+	if len(m.feedPosts) > 0 {
+		b.WriteString(m.feedFilterBar() + "\n\n")
+		if len(vis) == 0 {
+			b.WriteString(m.theme.Muted.Render("No "+feedFilterLabel(m.feedFilter)+" posts loaded. [ and ] change the category.") + "\n")
+		}
+	}
 	// Keep the selection on screen: show a window around it.
 	_, ih := m.innerSize()
-	rows := max(ih-6, 3)
+	rows := max(ih-8, 3)
 	start := max(m.feedIndex-rows/2, 0)
-	end := min(start+rows, len(m.feedPosts))
+	end := min(start+rows, len(vis))
 	start = max(end-rows, 0)
 	now := time.Now()
 	for i := start; i < end; i++ {
-		p := m.feedPosts[i]
+		p := vis[i]
 		verified := ""
 		if p.GitHubVerified {
 			verified = " ✓"
 		}
+		isNew := m.feedIsNew(p)
 		line := fmt.Sprintf("[%s] %s", categoryTag(p.Category), truncateRunes(sanitizeSingleLine(p.Title), 60))
 		meta := fmt.Sprintf("  %s%s · %s", truncateRunes(sanitizeSingleLine(p.Author), 20), verified, ago(p.CreatedAt, now))
-		if i == m.feedIndex {
+		if isNew {
+			meta += " · new"
+		}
+		switch {
+		case i == m.feedIndex:
 			b.WriteString(m.theme.TabActive.Render("› "+line) + m.theme.Muted.Render(meta) + "\n")
-		} else {
+		case isNew:
+			b.WriteString(m.theme.AccentText.Render("● ") + line + m.theme.Muted.Render(meta) + "\n")
+		default:
 			b.WriteString("  " + line + m.theme.Muted.Render(meta) + "\n")
 		}
 	}
-	if start > 0 || end < len(m.feedPosts) {
-		fmt.Fprintf(&b, "\n%s", m.theme.Muted.Render(fmt.Sprintf("showing %d-%d of %d loaded", start+1, end, len(m.feedPosts))))
+	if start > 0 || end < len(vis) {
+		fmt.Fprintf(&b, "\n%s", m.theme.Muted.Render(fmt.Sprintf("showing %d-%d of %d loaded", start+1, end, len(vis))))
 	}
-	hints := "↑/↓ select · enter open · p post · r refresh"
+	hints := "↑/↓ select · enter open · [ ] category · p post · r refresh"
 	if m.feedMore {
 		hints += " · m more"
 	}
@@ -595,8 +713,27 @@ func (m Model) renderFeed() string {
 	return b.String()
 }
 
+// feedFilterBar is the category row above the list: the current one in
+// the accent colour, and how many posts in the current view are new.
+func (m Model) feedFilterBar() string {
+	var parts []string
+	for _, f := range feedFilters {
+		label := feedFilterLabel(f)
+		if f == m.feedFilter {
+			parts = append(parts, m.theme.AccentText.Render("["+label+"]"))
+		} else {
+			parts = append(parts, m.theme.Muted.Render(label))
+		}
+	}
+	bar := strings.Join(parts, m.theme.Muted.Render(" · "))
+	if n := m.feedNewIn(m.feedVisible()); n > 0 {
+		bar += m.theme.Muted.Render(fmt.Sprintf("   ● %d new", n))
+	}
+	return bar
+}
+
 func (m Model) renderPost() string {
-	p := m.feedPosts[m.feedIndex]
+	p := m.feedVisible()[m.feedIndex]
 	w := m.contentWidth()
 	now := time.Now()
 

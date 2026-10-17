@@ -343,7 +343,9 @@ type Model struct {
 	feedLoaded         bool
 	feedErr            string
 	feedMore           bool
-	feedIndex          int
+	feedIndex          int       // selection: an index into feedVisible(), not feedPosts
+	feedFilter         string    // category being shown ("" = all)
+	feedSeenAt         time.Time // newest post the user has been shown; later ones are "new"
 	feedOpen           bool
 	feedComments       []api.Comment
 	feedCommentsLoaded bool
@@ -520,6 +522,13 @@ type Model struct {
 	chatScroll    int
 	chatScrollFor chat.ContactKey
 
+	// The unread divider (see syncChatMarker in chatview.go): drawn above
+	// message chatMarkIdx of thread chatMarkFor, labelled with
+	// chatMarkCount. A snapshot taken when the thread comes on screen.
+	chatMarkFor   chat.ContactKey
+	chatMarkIdx   int
+	chatMarkCount int
+
 	quitting bool
 }
 
@@ -557,6 +566,10 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 	// already represents - there's nothing to distinguish or report.
 	githubHandle, _ := store.LoadPreference(db.PrefGitHubHandle)
 	displayName, _ := store.LoadPreference(db.PrefDisplayName)
+	var feedSeenAt time.Time
+	if v, err := store.LoadPreference(db.PrefFeedSeen); err == nil {
+		feedSeenAt, _ = time.Parse(time.RFC3339Nano, v) // a bad value just means no baseline
+	}
 
 	// The startup checklist (see boot.go) is opt-out via `:boot off` -
 	// default on, but never forced on someone who turned it off.
@@ -581,6 +594,7 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 		githubClientID: os.Getenv("SYNQ_GITHUB_CLIENT_ID"),
 		githubHandle:   githubHandle,
 		displayName:    displayName,
+		feedSeenAt:     feedSeenAt,
 		apiClient:      session.API,
 		username:       session.Username,
 		accessToken:    session.AccessToken,
@@ -637,15 +651,33 @@ func (m Model) Init() tea.Cmd {
 }
 
 // Update implements tea.Model.
+//
+// It is a thin wrapper around update that does the bookkeeping which
+// depends on what ended up on screen rather than on which message caused
+// it: the unread divider and counts for the open thread
+// (syncChatMarker), and keeping the thread-list selection on the same
+// contact when a new message re-ranks the list. Doing these here, once,
+// means none of the several ways of opening a thread (or of receiving a
+// message) has to remember to.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	prev := m.selectedThread()
 	next, cmd := m.update(msg)
-	if nm, ok := next.(Model); ok {
-		// Whatever just happened, a thread that is now on screen has
-		// been read.
-		nm.markViewedRead()
-		return nm, cmd
+	nm, ok := next.(Model)
+	if !ok {
+		return next, cmd
 	}
-	return next, cmd
+	// "Since you last looked" ends when you leave the Feed or quit.
+	if (m.activeTab == tabFeed && nm.activeTab != tabFeed) || (nm.quitting && !m.quitting) {
+		nm.markFeedSeen()
+	}
+	nm.syncChatMarker()
+	// A key press that moved the list selection means it; anything else
+	// (a message arriving, say) may have re-ranked the list under it, so
+	// put the selection back on the contact it was on.
+	if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+		nm = nm.withListAnchor(prev)
+	}
+	return nm, cmd
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1053,25 +1085,13 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.activeTab == tabChat && m.identity != nil && m.chatActive == "" {
 		switch msg.String() {
 		case "up", "k":
-			m.chatListIndex--
-			threads := m.chatStore.Threads()
-			if m.chatListIndex < 0 {
-				m.chatListIndex = len(threads) - 1
-			}
+			m.wrapChatList(-1)
 			return m, nil
 		case "down", "j":
-			m.chatListIndex++
-			threads := m.chatStore.Threads()
-			if len(threads) > 0 && m.chatListIndex >= len(threads) {
-				m.chatListIndex = 0
-			}
+			m.wrapChatList(1)
 			return m, nil
 		case "enter":
-			threads := m.chatStore.Threads()
-			if len(threads) > 0 && m.chatListIndex >= 0 && m.chatListIndex < len(threads) {
-				m.chatActive = threads[m.chatListIndex]
-				m.chatInput, m.chatBack = "", 0
-			}
+			m.openSelectedChat()
 			return m, nil
 		}
 	}
@@ -1756,18 +1776,15 @@ func (m Model) renderTabBar() string {
 	var parts []string
 	for i, t := range allTabs {
 		label := fmt.Sprintf("%d %s", i+1, t)
-		unread := 0
-		if t == tabChat {
-			unread = m.unreadTotal()
-			if unread > 0 {
-				label += fmt.Sprintf(" (%d new)", unread)
-			}
+		badge := m.tabBadge(t)
+		if badge > 0 {
+			label += " " + m.tabBadgeText(t, badge)
 		}
 		switch {
 		case t == m.activeTab:
 			parts = append(parts, m.theme.TabActive.Render(label))
-		case unread > 0:
-			// Unread messages: the label stands out from the other
+		case badge > 0:
+			// Something needs you: the label stands out from the other
 			// inactive tabs, in the theme's accent colour.
 			parts = append(parts, m.theme.TabInactive.Foreground(m.theme.Palette.Accent).Bold(true).Render(label))
 		default:
@@ -1775,6 +1792,29 @@ func (m Model) renderTabBar() string {
 		}
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// tabBadge is the number shown beside a tab's name: chat messages you
+// haven't seen, or node requests waiting on you. Zero shows nothing.
+// Both count things that need you, not things that exist.
+func (m Model) tabBadge(t tab) int {
+	switch t {
+	case tabChat:
+		return m.unreadTotal()
+	case tabNodes:
+		if m.identity != nil && m.nodesLoaded {
+			return len(groupNodes(m.nodes, m.username).Incoming)
+		}
+	}
+	return 0
+}
+
+// tabBadgeText is the badge as written in the tab bar.
+func (m Model) tabBadgeText(t tab, n int) string {
+	if t == tabNodes {
+		return fmt.Sprintf("(%d pending)", n)
+	}
+	return fmt.Sprintf("(%d new)", n)
 }
 
 // renderHeader combines the tab bar (left) with the connection status

@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS preferences (
 );
 `
 
+// PrefFeedSeen is the preferences key under which the time of the newest
+// Feed post the user has been shown is stored (RFC 3339 with fractional
+// seconds). Posts created after it are marked new. Losing it only means
+// the markers start fresh, so it is best-effort.
+const PrefFeedSeen = "feed_seen"
+
 // PrefTheme is the preferences key under which the selected theme name
 // (e.g. "dracula", "nord", "monokai") is stored.
 const PrefTheme = "theme"

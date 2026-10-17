@@ -176,16 +176,6 @@ func (m *Model) noteUnread(contact chat.ContactKey, notify bool) {
 	}
 }
 
-// markViewedRead clears the unread count of the thread now on screen. It
-// runs after every update, so every way of arriving at a thread - the
-// list, :chat, a pinned-key prompt - clears it without each having to
-// remember to.
-func (m *Model) markViewedRead() {
-	if m.viewingThread(m.chatActive) {
-		delete(m.unread, m.chatActive)
-	}
-}
-
 func (m Model) unreadIn(contact chat.ContactKey) int { return m.unread[contact] }
 
 func (m Model) unreadTotal() int {

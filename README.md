@@ -126,12 +126,12 @@ Requires Go 1.23+.
 | `Ctrl+W` / `Ctrl+U` / `Ctrl+K` | Delete the previous word / back to the start of the line / on to the end of the line |
 | `↑` `↓` | In a post or comment body: move between lines |
 | `PgUp` `PgDn` | Chat thread: scroll. `Ctrl+Home` / `Ctrl+End` jump to the oldest / newest message |
-| `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
+| `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. `[` / `]` switch the category (All, Project, Hiring, General); posts that arrived since you last looked are marked `●`/`new`. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
 | `q` / `Ctrl+C` | Quit |
 
 ## Receiving messages
 
-Messages from your active nodes arrive on their own - you do not have to run `:chat` first, or have their thread open. Both of you do have to be online: synq-server never stores a message, so one sent to someone who is offline is simply not delivered. A thread with unread messages shows `● N new` in the Chat list, the Chat tab shows `(N new)` in the accent colour, and the bottom bar names the sender. Opening the thread clears them.
+Messages from your active nodes arrive on their own - you do not have to run `:chat` first, or have their thread open. Both of you do have to be online: synq-server never stores a message, so one sent to someone who is offline is simply not delivered. A thread with unread messages shows `● N new` in the Chat list, the Chat tab shows `(N new)` in the accent colour, and the bottom bar names the sender. Opening the thread clears them and draws a "N new messages" line above the first unread one, scrolled into view; the line stays where it is while you keep the thread open. Threads with unread messages sort to the top of the list, then by latest message. The Nodes tab shows `(N pending)` while requests are waiting on you.
 
 ## Command palette
 

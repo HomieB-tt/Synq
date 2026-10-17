@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -52,6 +53,11 @@ const (
 
 	// chatPageStep is how many messages PgUp / PgDn move.
 	chatPageStep = 5
+
+	// chatFixedRows is roughly how many rows of an open thread go to
+	// things other than messages (header, banner, spacer, composer,
+	// hint) - used to work out how much conversation fits on screen.
+	chatFixedRows = 7
 )
 
 // panelStyle is the bordered pane every tab's body is drawn in. Both
@@ -136,7 +142,7 @@ func (m Model) renderChat() string {
 func (m Model) renderChatList() string {
 	t := m.theme
 	w, h := m.innerSize()
-	threads := m.chatStore.Threads()
+	threads := m.orderedThreads()
 
 	title := t.AccentText.Render("Chats")
 	if len(threads) == 0 {
@@ -306,7 +312,7 @@ func (m Model) chatHeader(w int, hasAbove bool) string {
 		marks = append(marks, "↑ earlier")
 	}
 	if off := m.chatOffset(); off > 0 {
-		marks = append(marks, fmt.Sprintf("↓ %d newer", off))
+		marks = append(marks, fmt.Sprintf("↓ %d newer · ctrl+end", off))
 	}
 	right := strings.Join(marks, "  ")
 	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
@@ -390,6 +396,15 @@ func (m Model) chatMessageArea(w, rows int) (lines []string, hasAbove bool) {
 			prev = &msgs[i-1]
 		}
 		b := m.chatMessageLines(prev, msgs[i], w)
+		if m.chatMarkFor == contact && m.chatMarkCount > 0 && start+i == m.chatMarkIdx {
+			// The unread boundary sits directly above the first message
+			// that arrived while you were away; the spacer row a new
+			// sender's block starts with would only separate the two.
+			if len(b) > 0 && b[0] == "" {
+				b = b[1:]
+			}
+			b = append([]string{m.chatDivider(w, m.chatMarkCount)}, b...)
+		}
 		blocks = append(blocks, b)
 		used += len(b)
 		first = i
@@ -407,6 +422,92 @@ func (m Model) chatMessageArea(w, rows int) (lines []string, hasAbove bool) {
 		hasAbove = true
 	}
 	return padTop(lines, rows), hasAbove
+}
+
+// chatDivider is the "N new messages" rule drawn above the first unread
+// message: a labelled horizontal line the width of the pane.
+func (m Model) chatDivider(w, n int) string {
+	label := fmt.Sprintf(" %d new messages ", n)
+	if n == 1 {
+		label = " 1 new message "
+	}
+	label = truncateToWidth(label, w)
+	left := max((w-lipgloss.Width(label))/2, 0)
+	right := max(w-left-lipgloss.Width(label), 0)
+	return m.theme.AccentText.Render(strings.Repeat("─", left) + label + strings.Repeat("─", right))
+}
+
+// syncChatMarker keeps the unread divider and the unread counts in step
+// with what is on screen. It runs after every Update.
+//
+//   - When a thread comes on screen, the divider is snapshotted: it goes
+//     above the first message that arrived while you were away, and stays
+//     on that message for as long as the thread stays on screen, however
+//     much more arrives - so it keeps meaning "this is where you left
+//     off". A thread opened with unread messages also scrolls to it.
+//   - When the thread goes off screen (back to the list, or another tab)
+//     the snapshot is dropped, so coming back to new messages shows a
+//     fresh divider and coming back to none shows no divider.
+//   - A thread on screen has nothing unread.
+func (m *Model) syncChatMarker() {
+	if m.chatStore == nil || !m.viewingThread(m.chatActive) {
+		m.chatMarkFor, m.chatMarkCount, m.chatMarkIdx = "", 0, 0
+		return
+	}
+	if m.chatMarkFor != m.chatActive {
+		total := m.chatStore.Len(m.chatActive)
+		count := min(m.unread[m.chatActive], total)
+		m.chatMarkFor, m.chatMarkCount, m.chatMarkIdx = m.chatActive, count, total-count
+		if count > 0 {
+			// Land with the divider in view, as near the top of the
+			// conversation area as it will go.
+			m.chatScroll = m.offsetToShowFrom(m.chatMarkIdx)
+			m.chatScrollFor = m.chatActive
+		}
+	}
+	delete(m.unread, m.chatActive)
+}
+
+// offsetToShowFrom is the scroll offset (messages back from the newest,
+// see chatOffset) that puts message first - with the unread divider
+// above it - at the top of the conversation area, followed by as many of
+// the messages after it as fit. If everything from first to the newest
+// already fits, that is offset 0: the live view.
+//
+// It lays the messages out rather than guessing a rows-per-message: a
+// message is anywhere from one row to three (a header and a spacer when
+// the sender changes or has been quiet), so a guess scrolls too far in
+// one thread and not far enough in another.
+func (m Model) offsetToShowFrom(first int) int {
+	contact := m.chatActive
+	total := m.chatStore.Len(contact)
+	if first < 0 || first >= total {
+		return 0
+	}
+	w, h := m.innerSize()
+	rows := max(h-chatFixedRows, 1)
+
+	from := max(first-1, 0) // one earlier message, for grouping context
+	msgs := m.chatStore.Slice(contact, from, min(first+rows, total))
+
+	used := 1 // the divider itself
+	last := first
+	for i := first - from; i < len(msgs); i++ {
+		var prev *chat.Message
+		if i > 0 {
+			prev = &msgs[i-1]
+		}
+		b := m.chatMessageLines(prev, msgs[i], w)
+		if i == first-from && len(b) > 0 && b[0] == "" {
+			b = b[1:] // the divider replaces the block's leading spacer
+		}
+		if i > first-from && used+len(b) > rows {
+			break // this one would push the divider off the top
+		}
+		used += len(b)
+		last = from + i
+	}
+	return max(total-1-last, 0)
 }
 
 // padTop pads lines with blank rows above until there are n, so a short
@@ -525,9 +626,86 @@ func (m *Model) noteIncoming(contact chat.ContactKey) {
 	}
 }
 
+// wrapChatList moves the thread-list selection like moveChatList but
+// wraps around at either end - the behaviour of the up/down keys.
+func (m *Model) wrapChatList(delta int) {
+	n := len(m.orderedThreads())
+	if n == 0 {
+		m.chatListIndex = 0
+		return
+	}
+	m.chatListIndex = ((m.chatListIndex+delta)%n + n) % n
+}
+
+// orderedThreads is the thread list in display order: threads with
+// unread messages first, then by most recent message, newest at the top.
+// This is the order the list is drawn in and the order the selection
+// index refers to - everything that indexes into the list goes through
+// here, so what you see highlighted is what Enter opens. (chat.Store
+// itself keeps first-message order; that is storage, not display.) Ties
+// keep that stored order, so the list never shuffles for no reason.
+func (m Model) orderedThreads() []chat.ContactKey {
+	if m.chatStore == nil {
+		return nil
+	}
+	threads := m.chatStore.Threads()
+	type ranked struct {
+		key    chat.ContactKey
+		unread bool
+		at     time.Time
+	}
+	rs := make([]ranked, len(threads))
+	for i, k := range threads {
+		rs[i] = ranked{key: k, unread: m.unread[k] > 0}
+		if n := m.chatStore.Len(k); n > 0 {
+			if last := m.chatStore.Slice(k, n-1, n); len(last) == 1 {
+				rs[i].at = last[0].At
+			}
+		}
+	}
+	sort.SliceStable(rs, func(i, j int) bool {
+		if rs[i].unread != rs[j].unread {
+			return rs[i].unread
+		}
+		return rs[i].at.After(rs[j].at)
+	})
+	out := make([]chat.ContactKey, len(rs))
+	for i, r := range rs {
+		out[i] = r.key
+	}
+	return out
+}
+
+// selectedThread is the contact the list selection is on ("" if none).
+func (m Model) selectedThread() chat.ContactKey {
+	threads := m.orderedThreads()
+	if len(threads) == 0 {
+		return ""
+	}
+	return threads[min(max(m.chatListIndex, 0), len(threads)-1)]
+}
+
+// withListAnchor keeps the list selection on prev after the order may
+// have changed. The selection is an index, and a message arriving
+// re-ranks the list - without this the highlight would slide onto a
+// different contact between one frame and the next, and Enter would open
+// the wrong thread.
+func (m Model) withListAnchor(prev chat.ContactKey) Model {
+	if prev == "" {
+		return m
+	}
+	for i, k := range m.orderedThreads() {
+		if k == prev {
+			m.chatListIndex = i
+			break
+		}
+	}
+	return m
+}
+
 // moveChatList moves the thread-list selection, clamped to the list.
 func (m *Model) moveChatList(delta int) {
-	n := len(m.chatStore.Threads())
+	n := len(m.orderedThreads())
 	if n == 0 {
 		m.chatListIndex = 0
 		return
@@ -541,7 +719,7 @@ func (m *Model) moveChatList(delta int) {
 // the same state `:chat <username>` would reach - minus the server
 // round trip.
 func (m *Model) openSelectedChat() {
-	threads := m.chatStore.Threads()
+	threads := m.orderedThreads()
 	if len(threads) == 0 {
 		return
 	}

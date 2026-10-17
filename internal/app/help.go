@@ -28,6 +28,7 @@ var helpKeys = []helpEntry{
 	{"PgUp PgDn (chat)", "scroll; Ctrl+Home/End: oldest/newest"},
 	{"Feed: ↑/↓ enter p", "select, open, write a post"},
 	{"[ ] (Feed)", "previous / next category"},
+	{"Nodes: ↑/↓ a enter b", "select, accept, chat, how to block"},
 	{"c (Profile)", "browse all commands, with explanations"},
 	{"r (Feed/Nodes)", "refresh"},
 	{"q / Ctrl+C", "quit"},

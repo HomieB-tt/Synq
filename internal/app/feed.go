@@ -685,18 +685,18 @@ func (m Model) renderFeed() string {
 			verified = " ✓"
 		}
 		isNew := m.feedIsNew(p)
-		line := fmt.Sprintf("[%s] %s", categoryTag(p.Category), truncateRunes(sanitizeSingleLine(p.Title), 60))
+		title := truncateRunes(sanitizeSingleLine(p.Title), 60)
 		meta := fmt.Sprintf("  %s%s · %s", truncateRunes(sanitizeSingleLine(p.Author), 20), verified, ago(p.CreatedAt, now))
 		if isNew {
 			meta += " · new"
 		}
 		switch {
 		case i == m.feedIndex:
-			b.WriteString(m.theme.TabActive.Render("› "+line) + m.theme.Muted.Render(meta) + "\n")
+			b.WriteString(m.theme.TabActive.Render("› ") + m.categoryChip(p.Category) + m.theme.TabActive.Render(" "+title) + m.theme.Muted.Render(meta) + "\n")
 		case isNew:
-			b.WriteString(m.theme.AccentText.Render("● ") + line + m.theme.Muted.Render(meta) + "\n")
+			b.WriteString(m.theme.AccentText.Render("● ") + m.categoryChip(p.Category) + " " + title + m.theme.Muted.Render(meta) + "\n")
 		default:
-			b.WriteString("  " + line + m.theme.Muted.Render(meta) + "\n")
+			b.WriteString("  " + m.categoryChip(p.Category) + " " + title + m.theme.Muted.Render(meta) + "\n")
 		}
 	}
 	if start > 0 || end < len(vis) {
@@ -742,7 +742,7 @@ func (m Model) renderPost() string {
 		verified = " [✓ GitHub: @" + sanitizeSingleLine(p.GitHubHandle) + "]"
 	}
 	var b strings.Builder
-	b.WriteString(m.theme.Warning.Render(fmt.Sprintf("[%s] %s", categoryTag(p.Category), sanitizeSingleLine(p.Title))) + "\n")
+	b.WriteString(m.categoryChip(p.Category) + " " + m.theme.Warning.Render(sanitizeSingleLine(p.Title)) + "\n")
 	b.WriteString(m.theme.Muted.Render(fmt.Sprintf("%s%s · %s", sanitizeSingleLine(p.Author), verified, ago(p.CreatedAt, now))) + "\n\n")
 	b.WriteString(strings.Join(wrapParagraphs(sanitizeMultiline(p.Content), w), "\n") + "\n\n")
 

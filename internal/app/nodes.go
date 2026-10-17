@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/HomieB-tt/synq/internal/api"
 )
@@ -21,6 +22,8 @@ import (
 type nodeRow struct {
 	Username string
 	UserID   string
+	Verified bool   // linked a GitHub account
+	Handle   string // ...and this is its handle
 }
 
 // nodeLists is the caller's relationships, sorted into what the tab
@@ -43,10 +46,12 @@ func groupNodes(rels []api.NodeRelationship, me string) nodeLists {
 		iAmRequester := false
 		switch {
 		case me != "" && r.RequesterUsername == me:
-			other = nodeRow{Username: r.TargetUsername, UserID: r.TargetID}
+			other = nodeRow{Username: r.TargetUsername, UserID: r.TargetID,
+				Verified: r.TargetGitHubVerified, Handle: r.TargetGitHubHandle}
 			iAmRequester = true
 		case me != "" && r.TargetUsername == me:
-			other = nodeRow{Username: r.RequesterUsername, UserID: r.RequesterID}
+			other = nodeRow{Username: r.RequesterUsername, UserID: r.RequesterID,
+				Verified: r.RequesterGitHubVerified, Handle: r.RequesterGitHubHandle}
 		default:
 			continue // not ours, or we don't know who we are yet
 		}
@@ -266,34 +271,239 @@ func (m Model) renderNodes() string {
 		return "Loading your nodes..."
 	}
 
+	return m.renderNodeList()
+}
+
+// --- selection and keys ---
+
+// nodeKind says which section an entry came from, and so what the row's
+// shortcut keys do.
+type nodeKind int
+
+const (
+	nodeIncoming nodeKind = iota // they asked: a accepts
+	nodeActive                   // mutual: enter starts a chat
+	nodeOutgoing                 // you asked: nothing to do but wait
+)
+
+type nodeEntry struct {
+	nodeRow
+	kind nodeKind
+}
+
+// entries is every row in display order - requests for you first,
+// because they are the only ones waiting on you - flattened so one index
+// can select across the sections.
+func (l nodeLists) entries() []nodeEntry {
+	out := make([]nodeEntry, 0, len(l.Incoming)+len(l.Active)+len(l.Outgoing))
+	for _, r := range l.Incoming {
+		out = append(out, nodeEntry{r, nodeIncoming})
+	}
+	for _, r := range l.Active {
+		out = append(out, nodeEntry{r, nodeActive})
+	}
+	for _, r := range l.Outgoing {
+		out = append(out, nodeEntry{r, nodeOutgoing})
+	}
+	return out
+}
+
+// listPage is how many rows PgUp / PgDn move on the Nodes tab.
+func (m Model) listPage() int {
+	_, h := m.innerSize()
+	return max(h-5, 1)
+}
+
+// updateNodesKey handles a key on the Nodes tab, reporting whether it
+// did. Everything it can do is also a command; these are the shortcuts
+// for the common cases. Blocking deliberately has no one-key form - it
+// only explains how to do it (see blockNode) - because it can't be
+// undone and the other person isn't told.
+func (m *Model) updateNodesKey(key string) (handled bool, cmd tea.Cmd) {
+	if m.identity == nil || m.apiClient == nil || m.accessToken == "" || !m.nodesLoaded {
+		return false, nil
+	}
+	entries := groupNodes(m.nodes, m.username).entries()
+	if len(entries) == 0 {
+		return false, nil
+	}
+	m.nodesSel = min(max(m.nodesSel, 0), len(entries)-1)
+	cur := entries[m.nodesSel]
+
+	switch key {
+	case "up", "k":
+		m.nodesSel = max(m.nodesSel-1, 0)
+	case "down", "j":
+		m.nodesSel = min(m.nodesSel+1, len(entries)-1)
+	case "pgup":
+		m.nodesSel = max(m.nodesSel-m.listPage(), 0)
+	case "pgdown":
+		m.nodesSel = min(m.nodesSel+m.listPage(), len(entries)-1)
+	case "g", "home":
+		m.nodesSel = 0
+	case "G", "end":
+		m.nodesSel = len(entries) - 1
+
+	case "a":
+		if cur.kind != nodeIncoming {
+			m.commandMsg = fmt.Sprintf("Nothing to accept from %s.", sanitizeForTerminal(cur.Username))
+			return true, nil
+		}
+		msg, c := m.acceptNode(cur.Username)
+		m.commandMsg = msg
+		return true, c
+
+	case "enter":
+		switch cur.kind {
+		case nodeActive:
+			msg, _, c := m.runCommand("chat " + cur.Username)
+			m.commandMsg = msg
+			return true, c
+		case nodeIncoming:
+			msg, c := m.acceptNode(cur.Username)
+			m.commandMsg = msg
+			return true, c
+		}
+		m.commandMsg = fmt.Sprintf("Waiting for %s to accept your request.", sanitizeForTerminal(cur.Username))
+
+	case "b":
+		m.commandMsg, _ = m.blockNode([]string{cur.Username})
+
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
+// --- rendering the list ---
+
+// renderNodeList draws the three sections with a selection. Usernames
+// come from other people, so they are sanitized; a section title is one
+// unbroken span (plain text people - and tests - can search for).
+func (m Model) renderNodeList() string {
+	t := m.theme
+	w, h := m.innerSize()
 	lists := groupNodes(m.nodes, m.username)
-	var b strings.Builder
-	section := func(title string, rows []nodeRow, hint string) {
+	entries := lists.entries()
+
+	if len(entries) == 0 {
+		lines := []string{t.AccentText.Render("Nodes"), ""}
+		for _, l := range wrapToWidth("No nodes yet.", w) {
+			lines = append(lines, t.Text.Render(l))
+		}
+		lines = append(lines, "")
+		for _, l := range wrapToWidth("There's no user search: ask someone for their exact username, then send them a request with :node <username>.", w) {
+			lines = append(lines, t.Muted.Render(l))
+		}
+		return strings.Join(m.withNodesFooter(lines, w, h, nodeEntry{}, false), "\n")
+	}
+
+	sel := min(max(m.nodesSel, 0), len(entries)-1)
+
+	// All rows, section by section, remembering where the selected one
+	// landed so the window can follow it.
+	var body []string
+	selLine, idx := 0, 0
+	section := func(title string, rows []nodeRow, kind nodeKind) {
 		if len(rows) == 0 {
 			return
 		}
-		fmt.Fprintf(&b, "%s (%d)\n", title, len(rows))
-		for _, r := range rows {
-			b.WriteString("  ")
-			b.WriteString(sanitizeForTerminal(r.Username))
-			if hint != "" {
-				b.WriteString(m.theme.Muted.Render("   " + strings.ReplaceAll(hint, "%s", sanitizeForTerminal(r.Username))))
-			}
-			b.WriteByte('\n')
+		if len(body) > 0 {
+			body = append(body, "")
 		}
-		b.WriteByte('\n')
+		body = append(body, t.AccentText.Render(fmt.Sprintf("%s (%d)", title, len(rows))))
+		for _, r := range rows {
+			if idx == sel {
+				selLine = len(body)
+			}
+			body = append(body, m.nodeRowLine(nodeEntry{r, kind}, idx == sel, w))
+			idx++
+		}
 	}
-	section("Requests for you", lists.Incoming, ":accept %s")
-	section("Nodes", lists.Active, ":chat %s")
-	section("Waiting on them", lists.Outgoing, "")
+	section("Requests for you", lists.Incoming, nodeIncoming)
+	section("Nodes", lists.Active, nodeActive)
+	section("Waiting on them", lists.Outgoing, nodeOutgoing)
 
-	if len(lists.Active)+len(lists.Incoming)+len(lists.Outgoing) == 0 {
-		b.WriteString("No nodes yet.\n\nThere's no user search: ask someone for their exact username, then\nsend them a request with :node <username>.\n\n")
-	}
+	footerRows := 2
 	if m.nodesErr != "" {
-		b.WriteString(m.theme.Warning.Render("Last refresh failed: " + sanitizeForTerminal(m.nodesErr)))
-		b.WriteString("\n\n")
+		footerRows = 3
 	}
-	b.WriteString(m.theme.Muted.Render(":node <user> request · :accept <user> · :block <user> confirm · r refresh"))
-	return b.String()
+	room := max(h-footerRows-1, 1)
+	start := 0
+	if len(body) > room {
+		start = min(max(selLine-room/2, 0), len(body)-room)
+	}
+	body = body[start:min(start+room, len(body))]
+
+	return strings.Join(m.withNodesFooter(body, w, h, entries[sel], true), "\n")
+}
+
+// withNodesFooter pads lines down to the pane's last rows and appends
+// the footer: any failed-refresh warning, the keys for the selected row,
+// and how to send a request.
+func (m Model) withNodesFooter(lines []string, w, h int, cur nodeEntry, haveSel bool) []string {
+	t := m.theme
+	var footer []string
+	if m.nodesErr != "" {
+		footer = append(footer, t.Warning.Render(truncateToWidth("Last refresh failed: "+sanitizeForTerminal(m.nodesErr), w)))
+	}
+	keys := "r refresh"
+	if haveSel {
+		switch cur.kind {
+		case nodeIncoming:
+			keys = "a accept · b block · ↑/↓ pgup/pgdn · r refresh"
+		case nodeActive:
+			keys = "enter chat · b block · ↑/↓ pgup/pgdn · r refresh"
+		case nodeOutgoing:
+			keys = "b block · ↑/↓ pgup/pgdn · r refresh"
+		}
+	}
+	footer = append(footer,
+		t.Muted.Render(truncateToWidth(keys, w)),
+		t.Muted.Render(truncateToWidth(":node <username> sends a request · :block <username> confirm", w)),
+	)
+	for len(lines) < h-len(footer) {
+		lines = append(lines, "")
+	}
+	return append(lines[:max(h-len(footer), 0)], footer...)
+}
+
+// nodeRowLine draws one entry: marker, name, GitHub badge, and on the
+// right what state the relationship is in. It is exactly w columns wide.
+func (m Model) nodeRowLine(e nodeEntry, selected bool, w int) string {
+	base, muted, accent, bg := m.rowStyles(selected)
+	marker, markerStyle := "  ", base
+	if selected {
+		marker, markerStyle = "▌ ", accent
+	}
+
+	status := map[nodeKind]string{
+		nodeIncoming: "wants to connect",
+		nodeActive:   "connected",
+		nodeOutgoing: "waiting for reply",
+	}[e.kind]
+
+	// On a narrow pane something has to give. The name matters most, then
+	// the badge, then the status words - so drop them in the reverse
+	// order, only as far as needed to leave the name a readable width.
+	const minName = 8
+	verified, handle := e.Verified, e.Handle
+	room := func() int {
+		return w - lipgloss.Width(marker) - badgeWidth(verified, handle) - lipgloss.Width(status) - 2
+	}
+	if status != "" && room() < minName {
+		status = ""
+	}
+	if verified && w-lipgloss.Width(marker)-badgeWidth(verified, handle) < minName {
+		verified, handle = false, ""
+	}
+	badge := badgeWidth(verified, handle)
+	name := truncateToWidth(sanitizeForTerminal(e.Username), max(room(), 1))
+	used := lipgloss.Width(marker) + lipgloss.Width(name) + badge
+
+	return markerStyle.Render(marker) +
+		base.Bold(true).Render(name) +
+		m.badgeSpans(verified, handle, base, muted, bg) +
+		base.Render(strings.Repeat(" ", max(w-used-lipgloss.Width(status), 1))) +
+		muted.Render(status)
 }

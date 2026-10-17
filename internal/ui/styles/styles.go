@@ -657,3 +657,14 @@ func New(p Palette) Theme {
 func Default() Theme {
 	return New(Dracula)
 }
+
+// Chip renders label as a small inverse-colored tag - the palette's
+// background as text on bg - for categories, status words and badges.
+func (t Theme) Chip(label string, bg color.Color) string {
+	return lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Palette.Background).
+		Background(bg).
+		Padding(0, 1).
+		Render(label)
+}

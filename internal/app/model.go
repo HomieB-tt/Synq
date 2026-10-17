@@ -333,6 +333,7 @@ type Model struct {
 	nodes       []api.NodeRelationship
 	nodesLoaded bool
 	nodesErr    string
+	nodesSel    int // highlighted row, an index into groupNodes(...).entries()
 
 	// Feed tab (see feed.go). feedPosts is what's loaded so far, newest
 	// first, with feedIndex the selection; feedOpen is true while one
@@ -1070,6 +1071,11 @@ func (m Model) handleBackgroundColor(msg tea.BackgroundColorMsg) Model {
 
 // updateNormalMode handles keys when the command palette is closed.
 func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.activeTab == tabNodes {
+		if handled, cmd := m.updateNodesKey(msg.String()); handled {
+			return m, cmd
+		}
+	}
 	if m.activeTab == tabFeed {
 		next, cmd, handled := m.updateFeedKeys(msg)
 		if handled {
@@ -2177,7 +2183,12 @@ func (m Model) renderProfile() string {
 	} else {
 		b.WriteString("(no display name set - see :name below)\n")
 	}
-	fmt.Fprintf(&b, "Public key:\n%x\n\n", m.identity.SigningPublic)
+	b.WriteString("Public key (read it out in blocks when you :verify a contact):\n")
+	w, _ := m.innerSize()
+	for _, row := range fingerprintGroups(m.identity.SigningPublic, min(max((w+1)/5, 1), 8)) {
+		b.WriteString(row + "\n")
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "synq-server: %s\n", m.serverStatusLabel())
 	fmt.Fprintf(&b, "Connection: %s\n", connectionLabel(m.connected))
 	fmt.Fprintf(&b, "GitHub: %s\n", m.githubStatusLabel())

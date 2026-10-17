@@ -180,13 +180,7 @@ func (m Model) renderChatList() string {
 // messages it holds, a preview of the latest, and its time - the whole
 // row filled with the Selected background when it's the highlighted one.
 func (m Model) chatListRow(contact chat.ContactKey, selected bool, w int) string {
-	t := m.theme
-	base, muted, accent := t.Text, t.Muted, t.AccentText
-	if selected {
-		base = t.Selected
-		muted = lipgloss.NewStyle().Foreground(t.Palette.Muted).Background(t.Surface)
-		accent = t.Selected.Foreground(t.Palette.Accent)
-	}
+	base, muted, accent, _ := m.rowStyles(selected)
 
 	marker, markerStyle := "  ", base
 	if selected {

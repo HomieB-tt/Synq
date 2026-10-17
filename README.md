@@ -133,6 +133,8 @@ Requires Go 1.23+.
 
 Messages from your active nodes arrive on their own - you do not have to run `:chat` first, or have their thread open. Both of you do have to be online: synq-server never stores a message, so one sent to someone who is offline is simply not delivered. A thread with unread messages shows `● N new` in the Chat list, the Chat tab shows `(N new)` in the accent colour, and the bottom bar names the sender. Opening the thread clears them and draws a "N new messages" line above the first unread one, scrolled into view; the line stays where it is while you keep the thread open. Threads with unread messages sort to the top of the list, then by latest message. The Nodes tab shows `(N pending)` while requests are waiting on you.
 
+On the Nodes tab, `↑`/`↓` (also `PgUp`/`PgDn`, `g`/`G`) move through requests, nodes and requests you sent; `a` accepts a request, `Enter` accepts it or opens a chat with a connected node, and `b` explains how to block (it never blocks by itself). GitHub-verified users show `✓ @handle`. The Feed shows each post's category as a coloured tag, and the Profile prints your public key in blocks of four digits so it can be read aloud when you `:verify` a contact.
+
 ## Command palette
 
 Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `:node`, `:accept`, `:verify`, `:register`, `:name` - and a prompt opens asking for it (as `:theme` opens its picker), so there is no syntax to remember. Typing the argument yourself, as in `:send ~/report.pdf`, still works. Not sure what is available? `:commands` lists everything, and the Profile tab's `c` key opens the same list.

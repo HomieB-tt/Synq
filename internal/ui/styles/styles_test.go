@@ -3,6 +3,8 @@ package styles
 import (
 	"image/color"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func rgb(c color.Color) (r, g, b uint8) {
@@ -43,5 +45,13 @@ func TestEveryThemeHasADistinctSurface(t *testing.T) {
 		if sr == br && sg == bg && sb == bb {
 			t.Errorf("%s: Surface is identical to Background - a selected row would be invisible", name)
 		}
+	}
+}
+
+func TestChipIsPaddedAndKeepsItsLabel(t *testing.T) {
+	th := Default()
+	got := ansi.Strip(th.Chip("PROJECT", th.Palette.Accent))
+	if got != " PROJECT " {
+		t.Errorf("chip = %q, want the label padded by one cell each side", got)
 	}
 }

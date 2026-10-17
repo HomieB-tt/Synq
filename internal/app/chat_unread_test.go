@@ -175,6 +175,7 @@ func TestDividerResetsWhenTheThreadLeavesTheScreen(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		m.chatStore.Append(alice, chat.Message{Body: []byte("away"), At: time.Now()})
 		m.noteIncoming(alice)
+		m.noteUnread(alice, false) // what handleSealed does for each arrival
 	}
 
 	m.activeTab = tabChat

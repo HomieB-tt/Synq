@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/HomieB-tt/synq/internal/api"
+	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/db"
 )
 
@@ -183,6 +184,7 @@ func TestLeavingTheFeedOrQuittingClearsTheMarkers(t *testing.T) {
 
 	m2 := filterModel()
 	m2.store = newTestKeyStore(t)
+	m2.chatStore = chat.NewStore() // quitting purges the session's chat history
 	m2.feedSeenAt = time.Date(2026, 10, 14, 8, 30, 0, 0, time.UTC)
 	next, _ = m2.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	if n := next.(Model).feedNewIn(m2.feedPosts); n != 0 {

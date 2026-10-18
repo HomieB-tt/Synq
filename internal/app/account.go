@@ -249,7 +249,7 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	m.composeOpen = false
 	m.compose = composeState{}
 	m.feedPosts, m.feedLoaded, m.feedOpen = nil, false, false
-	m.feedComments, m.feedCommentsLoaded = nil, false
+	m.clearComments()
 	reload := m.fetchFeedCmd(0)
 
 	if msg.err != nil {

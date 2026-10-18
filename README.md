@@ -126,7 +126,7 @@ Requires Go 1.23+.
 | `Ctrl+W` / `Ctrl+U` / `Ctrl+K` | Delete the previous word / back to the start of the line / on to the end of the line |
 | `↑` `↓` | In a post or comment body: move between lines |
 | `PgUp` `PgDn` | Chat thread: scroll. `Ctrl+Home` / `Ctrl+End` jump to the oldest / newest message |
-| `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. `[` / `]` switch the category (All, Project, Hiring, General); posts that arrived since you last looked are marked `●`/`new`. In an open post: `c` comment, `x` x2 delete your own, `Esc` back. |
+| `↑`/`↓` `Enter` `p` `r` `m` | Feed tab: select, open a post and its comments, write a post, refresh, load more. `[` / `]` switch the category (All, Project, Hiring, General); posts that arrived since you last looked are marked `●`/`new`. In an open post: `↑`/`↓` `PgUp`/`PgDn` `Home`/`End` scroll, `m` loads the next 50 comments (a long thread loads a page at a time), `c` comment, `r` refresh, `x` x2 delete your own, `Esc` back. |
 | `q` / `Ctrl+C` | Quit |
 
 ## Receiving messages

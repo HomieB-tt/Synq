@@ -24,6 +24,13 @@ import (
 const (
 	feedPageSize = 50
 
+	// commentPageSize is how many comments one request loads. The server
+	// would give 200 by default and 500 at most (API.md); a smaller page
+	// keeps opening a busy post quick, and m loads the next one.
+	commentPageSize = 50
+	// maxCommentsFetch is the server's page cap, the most one reload asks for.
+	maxCommentsFetch = 500
+
 	// Limits from API.md: title 1-120 characters, content 1-10000.
 	maxTitleRunes   = 120
 	maxContentRunes = 10000
@@ -114,10 +121,18 @@ func (m Model) handleFeedLoaded(msg feedLoadedMsg) (tea.Model, tea.Cmd) {
 type commentsLoadedMsg struct {
 	postID   string
 	comments []api.Comment
+	offset   int // where this page starts; 0 replaces what is shown
+	limit    int // how many were asked for: a full page means there may be more
 	err      error
 }
 
+// fetchCommentsCmd loads the first page of a post's comments.
 func (m Model) fetchCommentsCmd(postID string) tea.Cmd {
+	return m.fetchCommentsPage(postID, 0, commentPageSize)
+}
+
+// fetchCommentsPage loads limit comments starting at offset.
+func (m Model) fetchCommentsPage(postID string, offset, limit int) tea.Cmd {
 	if m.apiClient == nil {
 		return nil
 	}
@@ -125,12 +140,34 @@ func (m Model) fetchCommentsCmd(postID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
 		defer cancel()
-		cs, err := client.ListComments(ctx, token, postID)
+		cs, err := client.ListComments(ctx, token, postID, limit, offset)
 		if err != nil && api.IsUnauthorized(err) && token != "" {
-			cs, err = client.ListComments(ctx, "", postID)
+			cs, err = client.ListComments(ctx, "", postID, limit, offset)
 		}
-		return commentsLoadedMsg{postID: postID, comments: cs, err: err}
+		return commentsLoadedMsg{postID: postID, comments: cs, offset: offset, limit: limit, err: err}
 	}
+}
+
+// reloadCommentsCmd refreshes the open post's comments, asking for at
+// least as many as are on screen (plus extra, for one just added) so a
+// refresh never throws away pages the reader has already loaded. The one
+// more than that is how it can tell whether the thread goes on: a page
+// that comes back full means there is more.
+func (m Model) reloadCommentsCmd(postID string, extra int) tea.Cmd {
+	return m.fetchCommentsPage(postID, 0, commentReloadLimit(len(m.feedComments), extra))
+}
+
+// commentReloadLimit is how many comments a reload asks for when have are
+// on screen: all of them, extra more, and one beyond to see if it goes on -
+// never less than a page and never more than the server will give.
+func commentReloadLimit(have, extra int) int {
+	return min(max(have+extra+1, commentPageSize), maxCommentsFetch)
+}
+
+// clearComments forgets the open post's comments, paging and scroll.
+func (m *Model) clearComments() {
+	m.feedComments, m.feedCommentsLoaded, m.feedCommentsErr = nil, false, ""
+	m.feedCommentsMore, m.feedScroll = false, 0
 }
 
 func (m Model) handleCommentsLoaded(msg commentsLoadedMsg) (tea.Model, tea.Cmd) {
@@ -142,8 +179,19 @@ func (m Model) handleCommentsLoaded(msg commentsLoadedMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	}
 	m.feedCommentsErr = ""
-	m.feedComments = msg.comments
+	if msg.offset > 0 {
+		// A "load more" page. If what is on screen no longer ends where
+		// the page starts (a refresh landed in between), it would leave a
+		// gap or a repeat, so drop it; m asks again.
+		if msg.offset != len(m.feedComments) {
+			return m, nil
+		}
+		m.feedComments = append(m.feedComments, msg.comments...)
+	} else {
+		m.feedComments = msg.comments
+	}
 	m.feedCommentsLoaded = true
+	m.feedCommentsMore = msg.limit > 0 && len(msg.comments) >= msg.limit
 	return m, nil
 }
 
@@ -256,7 +304,7 @@ func (m Model) updateFeedKeys(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd,
 		switch key {
 		case "esc", "backspace", "left", "h":
 			m.feedOpen = false
-			m.feedComments, m.feedCommentsLoaded, m.feedCommentsErr = nil, false, ""
+			m.clearComments()
 			m.deleteArmed = ""
 			return m, nil, true
 		case "c":
@@ -267,7 +315,30 @@ func (m Model) updateFeedKeys(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd,
 			m.openCompose(composeState{kind: composeComment, postID: m.openPost().ID})
 			return m, nil, true
 		case "r":
-			return m, m.fetchCommentsCmd(m.openPost().ID), true
+			return m, m.reloadCommentsCmd(m.openPost().ID, 0), true
+		case "m":
+			if m.feedCommentsMore {
+				return m, m.fetchCommentsPage(m.openPost().ID, len(m.feedComments), commentPageSize), true
+			}
+			return m, nil, true
+		case "up", "k":
+			m.scrollPost(-1)
+			return m, nil, true
+		case "down", "j":
+			m.scrollPost(1)
+			return m, nil, true
+		case "pgup":
+			m.scrollPost(-max(m.postViewRows()-1, 1))
+			return m, nil, true
+		case "pgdown":
+			m.scrollPost(max(m.postViewRows()-1, 1))
+			return m, nil, true
+		case "home":
+			m.feedScroll = 0
+			return m, nil, true
+		case "end":
+			m.feedScroll = m.maxPostScroll()
+			return m, nil, true
 		case "x":
 			return m.deleteOwnPost()
 		}
@@ -296,7 +367,7 @@ func (m Model) updateFeedKeys(msg tea.KeyPressMsg) (next tea.Model, cmd tea.Cmd,
 	case "enter", "right", "l":
 		if p := m.openPost(); p != nil {
 			m.feedOpen = true
-			m.feedComments, m.feedCommentsLoaded, m.feedCommentsErr = nil, false, ""
+			m.clearComments()
 			return m, m.fetchCommentsCmd(p.ID), true
 		}
 		return m, nil, true
@@ -452,11 +523,16 @@ func (m Model) handleFeedAction(msg feedActionMsg) (tea.Model, tea.Cmd) {
 		m.compose = composeState{}
 		m.commandMsg = "Comment added."
 		if p := m.openPost(); p != nil && m.feedOpen {
-			return m, m.fetchCommentsCmd(p.ID)
+			if m.feedCommentsMore {
+				// Comments are oldest first, so the new one is at the very
+				// end, past pages that haven't been loaded.
+				m.commandMsg = "Comment added. This thread has more comments than are loaded - press m to load them."
+			}
+			return m, m.reloadCommentsCmd(p.ID, 1)
 		}
 	case "delete":
 		m.feedOpen = false
-		m.feedComments, m.feedCommentsLoaded = nil, false
+		m.clearComments()
 		m.commandMsg = "Post deleted."
 		return m, m.fetchFeedCmd(0)
 	case "report":
@@ -737,7 +813,10 @@ func (m Model) feedFilterBar() string {
 	return bar
 }
 
-func (m Model) renderPost() string {
+// postBodyLines is the open post as screen lines: its header, its text and
+// the comments loaded so far. renderPost shows a window of these; the
+// key handlers use the count to know how far there is to scroll.
+func (m Model) postBodyLines() []string {
 	p := m.feedVisible()[m.feedIndex]
 	w := m.contentWidth()
 	now := time.Now()
@@ -751,7 +830,11 @@ func (m Model) renderPost() string {
 	b.WriteString(m.theme.Muted.Render(fmt.Sprintf("%s%s · %s", sanitizeSingleLine(p.Author), verified, ago(p.CreatedAt, now))) + "\n\n")
 	b.WriteString(strings.Join(wrapParagraphs(sanitizeMultiline(p.Content), w), "\n") + "\n\n")
 
-	b.WriteString(m.theme.StatusBar.Render(fmt.Sprintf("Comments (%d)", len(m.feedComments))) + "\n")
+	count := fmt.Sprintf("Comments (%d", len(m.feedComments))
+	if m.feedCommentsMore {
+		count += "+"
+	}
+	b.WriteString(m.theme.StatusBar.Render(count+")") + "\n")
 	switch {
 	case m.feedCommentsErr != "":
 		b.WriteString(m.theme.Warning.Render("Couldn't load comments: "+sanitizeSingleLine(m.feedCommentsErr)) + "\n")
@@ -766,12 +849,66 @@ func (m Model) renderPost() string {
 			b.WriteString("  " + l + "\n")
 		}
 	}
-	hints := "esc back · c comment · r refresh · :report [reason]"
+	if m.feedCommentsMore {
+		b.WriteString("\n" + m.theme.Muted.Render(fmt.Sprintf("%d comments loaded - press m for the next %d", len(m.feedComments), commentPageSize)) + "\n")
+	}
+	return strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+}
+
+// postFooterRows is what renderPost keeps pinned under the scrolling text:
+// the "more above/below" line, a spacer and the key hints.
+const postFooterRows = 3
+
+// postViewRows is how many lines of the post fit above its footer.
+func (m Model) postViewRows() int {
+	_, ih := m.innerSize()
+	return max(ih-postFooterRows, 3)
+}
+
+// maxPostScroll is how far the open post can scroll.
+func (m Model) maxPostScroll() int {
+	if m.openPost() == nil {
+		return 0
+	}
+	return max(len(m.postBodyLines())-m.postViewRows(), 0)
+}
+
+// scrollPost moves the post view by delta lines, staying inside the text.
+func (m *Model) scrollPost(delta int) {
+	m.feedScroll = min(max(m.feedScroll+delta, 0), m.maxPostScroll())
+}
+
+func (m Model) renderPost() string {
+	p := m.feedVisible()[m.feedIndex]
+	lines := m.postBodyLines()
+	rows := m.postViewRows()
+
+	scroll := min(max(m.feedScroll, 0), max(len(lines)-rows, 0))
+	end := min(scroll+rows, len(lines))
+	shown := append([]string(nil), lines[scroll:end]...)
+	for len(shown) < rows {
+		shown = append(shown, "") // keep the footer on the bottom row
+	}
+
+	above, below := scroll, len(lines)-end
+	marker := ""
+	switch {
+	case above > 0 && below > 0:
+		marker = fmt.Sprintf("↑ %d more above · ↓ %d more below", above, below)
+	case above > 0:
+		marker = fmt.Sprintf("↑ %d more above", above)
+	case below > 0:
+		marker = fmt.Sprintf("↓ %d more below", below)
+	}
+
+	hints := "esc back · ↑/↓ scroll · c comment · r refresh · :report [reason]"
+	if m.feedCommentsMore {
+		hints += " · m more comments"
+	}
 	if m.username != "" && p.Author == m.username {
 		hints += " · x delete"
 	}
-	b.WriteString("\n" + m.theme.Muted.Render(hints))
-	return b.String()
+	return strings.Join(shown, "\n") + "\n" + m.theme.Muted.Render(marker) + "\n\n" + m.theme.Muted.Render(hints)
 }
 
 func (m Model) renderCompose() string {

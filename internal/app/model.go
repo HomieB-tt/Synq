@@ -351,6 +351,8 @@ type Model struct {
 	feedComments       []api.Comment
 	feedCommentsLoaded bool
 	feedCommentsErr    string
+	feedCommentsMore   bool // the last page was full, so there may be more to load (m)
+	feedScroll         int  // first visible line of the open post
 	deleteArmed        string
 	composeOpen        bool
 	compose            composeState

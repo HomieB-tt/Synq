@@ -87,11 +87,17 @@ func (c *Client) ReportPost(ctx context.Context, accessToken, postID, reason str
 		map[string]string{"reason": reason}, nil)
 }
 
-// ListComments fetches a post's comments, oldest first. Same guest/
-// anonymization rules as ListFeed.
-func (c *Client) ListComments(ctx context.Context, accessToken, postID string) ([]Comment, error) {
+// ListComments fetches a page of a post's comments, oldest first. Same
+// guest/anonymization rules as ListFeed. limit/offset of 0 use the
+// server's defaults (200, 0); limit is clamped server-side to 500. A
+// thread longer than one page needs another call with a larger offset.
+func (c *Client) ListComments(ctx context.Context, accessToken, postID string, limit, offset int) ([]Comment, error) {
+	path := "/feed/" + postID + "/comments"
+	if limit > 0 || offset > 0 {
+		path += fmt.Sprintf("?limit=%d&offset=%d", limit, offset)
+	}
 	var resp []Comment
-	err := c.do(ctx, http.MethodGet, "/feed/"+postID+"/comments", accessToken, nil, &resp)
+	err := c.do(ctx, http.MethodGet, path, accessToken, nil, &resp)
 	return resp, err
 }
 

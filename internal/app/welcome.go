@@ -35,7 +35,7 @@ var welcomePages = [][]string{
 		":chat <username> opens an encrypted thread once you are connected.",
 		"",
 		"#Share a file",
-		"In a chat, press Ctrl+P and run :send. Received files are under :files. Commands like :send ask for what they need, so you never have to remember the syntax.",
+		"In a chat, press Ctrl+P and run :send. Received files are under :files. Commands like :send ask for what they need, so you never have to remember the syntax. Run the command :savedir during setup, to determine the default save location.",
 	},
 }
 

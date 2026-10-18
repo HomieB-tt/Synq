@@ -1686,7 +1686,7 @@ func (m Model) View() tea.View {
 		b.WriteString("\n\n")
 		b.WriteString(m.renderContent())
 		b.WriteString("\n")
-		b.WriteString(m.renderBottomBar())
+		b.WriteString(m.indentPane(m.renderBottomBar()))
 		content = b.String()
 	}
 
@@ -1904,13 +1904,17 @@ func (m Model) renderContent() string {
 		return placeWithBackground(m.renderHelp(), width, height, m.theme.Palette.Background)
 	}
 
+	// Every tab's body goes in the same pane: contentSize is its outer
+	// size, and innerSize (what the tabs lay themselves out to) is
+	// derived from the same style, so nothing can wrap or fall short.
+	pw, ph := m.contentSize()
+	pane := func(body string) string {
+		return m.indentPane(m.panelStyle().Width(pw).Height(ph).Render(body))
+	}
+
 	var body string
 	if m.composeOpen {
-		return m.theme.Border.
-			Width(width-2).
-			Height(height).
-			Padding(1, 2).
-			Render(m.renderCompose())
+		return pane(m.renderCompose())
 	}
 	switch m.activeTab {
 	case tabFeed:
@@ -1921,20 +1925,13 @@ func (m Model) renderContent() string {
 		if m.identity == nil {
 			body = "Create an identity to send encrypted messages. Restart Synq and choose \"Create your identity.\""
 		} else {
-			// renderChat manages its own border and sizing via
-			// panelStyle/contentSize/innerSize - return it directly
-			// rather than double-wrapping it in the Border below.
-			return m.renderChat()
+			body = m.renderChat()
 		}
 	case tabProfile:
 		body = m.renderProfile()
 	}
 
-	return m.theme.Border.
-		Width(width-2).
-		Height(height).
-		Padding(1, 2).
-		Render(body)
+	return pane(body)
 }
 
 // hintText returns the general key-hint shown in the status bar at the
@@ -2246,11 +2243,13 @@ func (m Model) renderBottomBar() string {
 	if m.commandMode {
 		return m.commandBarLine()
 	}
-	if s := m.transferStatus(max(m.width, 20)); s != "" {
+	if s := m.transferStatus(max(m.paneWidth(), 20)); s != "" {
 		return m.theme.AccentText.Render(s)
 	}
 	if m.commandMsg != "" {
-		return m.theme.Warning.Render(m.commandMsg)
+		// The same wrapped rows contentSize counted, so the pane above
+		// leaves exactly the room this takes.
+		return strings.Join(m.bottomLines(), "\n")
 	}
 	if m.identity == nil {
 		return m.theme.StatusBar.Render(

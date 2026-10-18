@@ -60,6 +60,47 @@ const (
 	chatFixedRows = 7
 )
 
+// maxPaneWidth caps how wide the pane (and the bottom bar under it) gets.
+// Past this, text lines are too long to read comfortably and everything
+// hugs the left edge of a wide terminal, so the pane stays this wide and
+// is centred instead. The tab bar above it still spans the window.
+const maxPaneWidth = 110
+
+// screenWidth is the terminal width, with the fallback used before the
+// first WindowSizeMsg arrives.
+func (m Model) screenWidth() int {
+	if m.width <= 0 {
+		return 80
+	}
+	return m.width
+}
+
+// paneWidth is the outer width of the pane: the terminal, up to
+// maxPaneWidth.
+func (m Model) paneWidth() int {
+	return min(m.screenWidth(), maxPaneWidth)
+}
+
+// paneMargin is the blank space to the left of a centred pane.
+func (m Model) paneMargin() int {
+	return (m.screenWidth() - m.paneWidth()) / 2
+}
+
+// indentPane shifts every line right by the pane margin, filling the gap
+// with the theme background so no cell is left unstyled.
+func (m Model) indentPane(block string) string {
+	n := m.paneMargin()
+	if n <= 0 {
+		return block
+	}
+	gap := lipgloss.NewStyle().Background(m.theme.Palette.Background).Render(strings.Repeat(" ", n))
+	lines := strings.Split(block, "\n")
+	for i, l := range lines {
+		lines[i] = gap + l
+	}
+	return strings.Join(lines, "\n")
+}
+
 // panelStyle is the bordered pane every tab's body is drawn in. Both
 // renderContent and innerSize derive their numbers from this one style,
 // so the pane and the maths that fits things inside it can't drift apart.
@@ -72,10 +113,7 @@ func (m Model) panelStyle() lipgloss.Style {
 // width - several of those results are a full sentence or two. Capped at
 // four rows so a runaway message can't eat the screen.
 func (m Model) bottomLines() []string {
-	width := m.width
-	if width <= 0 {
-		width = 80
-	}
+	width := m.paneWidth()
 	if m.commandMode {
 		return []string{m.commandBarLine()}
 	}
@@ -102,10 +140,7 @@ func (m Model) bottomLines() []string {
 // the bottom bar needs this frame. (lipgloss v2's Width and Height
 // include the border and padding, so this is the pane's true footprint.)
 func (m Model) contentSize() (w, h int) {
-	w = m.width
-	if w <= 0 {
-		w = 80
-	}
+	w = m.paneWidth()
 	h = m.height
 	if h <= 0 {
 		h = 24

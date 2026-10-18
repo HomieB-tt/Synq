@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -350,5 +352,38 @@ func TestRenderFeedGuestAndEmptyStates(t *testing.T) {
 	m = Model{}
 	if out := m.renderFeed(); !strings.Contains(out, "SYNQ_SERVER_URL") {
 		t.Errorf("no server: %q", out)
+	}
+}
+
+func TestComposerHintExplainsHowToComeBackFromTheEditor(t *testing.T) {
+	m := feedModel()
+	m.startPost("")
+	if got := plain(m.renderCompose()); !strings.Contains(got, "quit it to come back") {
+		t.Errorf("the composer's key hints don't say how to leave the editor:\n%s", got)
+	}
+}
+
+func TestReturningFromTheEditorSaysNothingIsPostedYet(t *testing.T) {
+	m := feedModel()
+	m.startPost("")
+
+	path := filepath.Join(t.TempDir(), "draft.txt")
+	if err := os.WriteFile(path, []byte("written in the editor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.handleEditorDone(editorDoneMsg{path: path})
+	m = next.(Model)
+
+	if m.compose.body != "written in the editor" {
+		t.Fatalf("body = %q", m.compose.body)
+	}
+	if got := plain(m.renderCompose()); !strings.Contains(got, "Nothing is posted until you press ctrl+s") {
+		t.Errorf("no reminder after the editor:\n%s", got)
+	}
+
+	// The next key press clears it.
+	m = typeInto(t, m, tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if m.compose.note != "" {
+		t.Errorf("note survived a key press: %q", m.compose.note)
 	}
 }

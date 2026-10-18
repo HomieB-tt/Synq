@@ -52,7 +52,10 @@ type composeState struct {
 	bodyBack  int
 	field     int // 0 = title, 1 = body (a comment has only a body)
 	err       string
-	sending   bool
+	// note is a one-off, non-error message shown above the key hints (for
+	// instance after coming back from $EDITOR); the next key clears it.
+	note    string
+	sending bool
 }
 
 // --- loading ---
@@ -499,6 +502,7 @@ func (m Model) updateCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if c.sending {
 		return m, nil // one send at a time; the result unlocks it
 	}
+	c.note = ""
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.composeOpen = false
@@ -629,6 +633,7 @@ func (m Model) handleEditorDone(msg editorDoneMsg) (tea.Model, tea.Cmd) {
 	m.compose.bodyBack = 0 // the draft was replaced wholesale; cursor to the end
 	m.compose.field = 1
 	m.compose.err = ""
+	m.compose.note = "Back from your editor - the draft is updated. Nothing is posted until you press ctrl+s."
 	return m, nil
 }
 
@@ -832,7 +837,10 @@ func (m Model) renderCompose() string {
 	if c.sending {
 		b.WriteString(m.theme.Muted.Render("Sending...") + "\n")
 	}
-	hints := "ctrl+s send · ctrl+o $EDITOR · esc discard"
+	if c.note != "" {
+		b.WriteString(m.theme.Muted.Render(sanitizeSingleLine(c.note)) + "\n")
+	}
+	hints := "ctrl+s send · ctrl+o $EDITOR (quit it to come back) · esc discard"
 	if c.kind == composePost {
 		hints = "tab title/content · ctrl+g category · " + hints
 	}

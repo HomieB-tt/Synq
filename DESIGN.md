@@ -134,6 +134,16 @@ The cache is wiped at startup and deleted on quit and on `:logout`, so a file th
 
 **Server session.** Attachments hang off a server-side session with a 60-second lease. The client creates one when it has a token, renews it every 20 seconds, starts a new one if the server reports the old one gone, and terminates it on quit.
 
+## 12. Rooms
+
+A room is a small (16 at most), invite-only, ephemeral group chat. The server keeps membership and a message counter and relays sealed bytes; it never holds message text (see `ROOMS.md` in synq-server).
+
+- **Key.** The owner makes a random 256-bit room key and sends it to each member inside the existing pairwise encrypted channel, with the roster (user id, username, Ed25519 key). That channel is already authenticated and key-pinned, so the key arrives authenticated as the owner's. Members need no relationship with each other, only with the owner - which is also the rule for who can be invited.
+- **Messages.** Each is signed by its author's identity key, then sealed under the room key with AES-256-GCM (room id and key generation as associated data). The receiver verifies against the roster key of the sender the server names, so a relay that relabels a message, or a member who holds the room key, cannot pass something off as someone else's. Replies point at a message id inside the signed payload. A message id already shown is ignored.
+- **Order.** The server numbers messages per room; the client places them by that number, so everyone sees one order.
+- **Lifetime.** Everything is memory-only. The room ends when the owner ends it, when the owner quits (a prompt asks first), or when the owner has been disconnected for `ROOM_OWNER_GRACE_SECS` (default 90). Ending deletes the room server-side and wipes keys and messages client-side. A room can't be rejoined after a restart: the key died with the process.
+- **Limits, stated plainly.** A member running a modified client can keep what they receive. The server can drop or delay messages and could end a room early. Members trust the owner for the roster. Removing members with re-keying, ownership transfer and files come later.
+
 ## Summary table
 
 | Area | Decision |
@@ -147,4 +157,5 @@ The cache is wiped at startup and deleted on quit and on `:logout`, so a file th
 | File transfer | Per-file key, chunked AES-256-GCM; key and name travel in the encrypted chat channel, not to the server; view (default app, never for runnable types) or save (to `:savedir`) after verification |
 | Theming | Explicit theme choice or one-time `RequestBackgroundColor`, no auto-detection |
 | `$EDITOR` | Falls back to built-in input if unset; any editor error/abort discards the draft |
+| Rooms | Invite-only groups of up to 16; owner-distributed room key over pairwise channels, signed AES-256-GCM messages, memory-only, ends with its owner |
 | GitHub verification | OAuth Device Flow, optional, separate from registration |

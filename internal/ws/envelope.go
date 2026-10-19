@@ -18,6 +18,12 @@ import (
 //	  { "type": "node_request", "from": "<requester-user-id>" }
 //	  { "type": "node_accepted", "from": "<other-user-id>" }
 //	  { "type": "error",        "error": "rate_limited" }
+//	  { "type": "room_message", "room", "seq", "from", "payload" }
+//	  { "type": "room_ack",     "room", "cid", "seq" }
+//	  { "type": "room_invite",  "room", "name", "from" }
+//	  { "type": "room_joined",  "room", "user" }
+//	  { "type": "room_left",    "room", "user" }
+//	  { "type": "room_ended",   "room", "reason" }
 //
 // The server relays "payload" opaquely - it never parses, stores, or
 // inspects it, which is what lets the client pick its own encoding
@@ -32,6 +38,14 @@ const (
 	// EventTypeError is the only failure signal the server ever sends
 	// back over the socket.
 	EventTypeError = "error"
+
+	// Room events (see synq-server's ROOMS.md).
+	EventTypeRoomMessage = "room_message"
+	EventTypeRoomAck     = "room_ack"
+	EventTypeRoomInvite  = "room_invite"
+	EventTypeRoomJoined  = "room_joined"
+	EventTypeRoomLeft    = "room_left"
+	EventTypeRoomEnded   = "room_ended"
 )
 
 // ErrorRateLimited is the only value EventTypeError carries today
@@ -49,6 +63,16 @@ type Event struct {
 	From    string
 	Payload []byte
 	Error   string
+
+	// Room events only. Room is the room id; User is who joined or left;
+	// Name is the room's name (invitations); Seq and Cid belong to room
+	// messages and acks; Reason says why a room ended.
+	Room   string
+	User   string
+	Name   string
+	Seq    int64
+	Cid    string
+	Reason string
 }
 
 // IsRateLimited reports whether e is the server's self-delivered
@@ -75,6 +99,13 @@ type inboundFrame struct {
 	From    string          `json:"from"`
 	Error   string          `json:"error"`
 	Payload json.RawMessage `json:"payload"`
+
+	Room   string `json:"room"`
+	User   string `json:"user"`
+	Name   string `json:"name"`
+	Seq    int64  `json:"seq"`
+	Cid    string `json:"cid"`
+	Reason string `json:"reason"`
 }
 
 // EncodeSend builds the single outgoing frame shape synq-server
@@ -132,6 +163,40 @@ func DecodeFrame(data []byte) (Event, error) {
 		}
 		return Event{Type: f.Type, From: f.From}, nil
 
+	case EventTypeRoomMessage:
+		if f.Room == "" || f.From == "" || f.Seq < 1 {
+			return Event{}, errors.New("ws: room_message frame is missing room, from or seq")
+		}
+		payload, err := decodePayload(f.Payload)
+		if err != nil {
+			return Event{}, err
+		}
+		return Event{Type: f.Type, Room: f.Room, From: f.From, Seq: f.Seq, Payload: payload}, nil
+
+	case EventTypeRoomAck:
+		if f.Room == "" || f.Cid == "" || f.Seq < 1 {
+			return Event{}, errors.New("ws: room_ack frame is missing room, cid or seq")
+		}
+		return Event{Type: f.Type, Room: f.Room, Cid: f.Cid, Seq: f.Seq}, nil
+
+	case EventTypeRoomInvite:
+		if f.Room == "" || f.From == "" {
+			return Event{}, errors.New("ws: room_invite frame is missing room or from")
+		}
+		return Event{Type: f.Type, Room: f.Room, From: f.From, Name: f.Name}, nil
+
+	case EventTypeRoomJoined, EventTypeRoomLeft:
+		if f.Room == "" || f.User == "" {
+			return Event{}, fmt.Errorf("ws: %s frame is missing room or user", f.Type)
+		}
+		return Event{Type: f.Type, Room: f.Room, User: f.User}, nil
+
+	case EventTypeRoomEnded:
+		if f.Room == "" {
+			return Event{}, errors.New("ws: room_ended frame has no room")
+		}
+		return Event{Type: f.Type, Room: f.Room, Reason: f.Reason}, nil
+
 	case EventTypeError:
 		if f.Error == "" {
 			return Event{}, errors.New("ws: error frame has no error")
@@ -158,4 +223,25 @@ func decodePayload(raw json.RawMessage) ([]byte, error) {
 		return nil, fmt.Errorf("ws: message payload is not valid base64: %w", err)
 	}
 	return payload, nil
+}
+
+// outboundRoomFrame is the client → server shape for a room message.
+type outboundRoomFrame struct {
+	Room    string `json:"room"`
+	Cid     string `json:"cid"`
+	Payload string `json:"payload"`
+}
+
+// EncodeRoomSend builds a room message frame. cid is the client's own id
+// for the message (room.NewMessageID); the server echoes it in the
+// room_ack so the sender learns the message's sequence number.
+func EncodeRoomSend(roomID, cid string, sealed []byte) ([]byte, error) {
+	if roomID == "" || cid == "" {
+		return nil, errors.New("ws: EncodeRoomSend: empty room or message id")
+	}
+	return json.Marshal(outboundRoomFrame{
+		Room:    roomID,
+		Cid:     cid,
+		Payload: base64.StdEncoding.EncodeToString(sealed),
+	})
 }

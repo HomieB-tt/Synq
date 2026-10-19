@@ -31,6 +31,24 @@ type Message struct {
 	Body     []byte
 	At       time.Time
 	Outgoing bool // true if this client sent it, false if a contact did
+
+	// The fields below are used by room threads only (see internal/room);
+	// a 1:1 message leaves them zero.
+
+	// ID is the author's id for the message, which replies refer to.
+	ID string
+	// Author is the sender's username in a room. Empty in a 1:1 chat,
+	// where the thread itself says who the other person is.
+	Author string
+	// Quote is a short excerpt of the message this one replies to, with
+	// its author ("bob: lunch?"), or empty.
+	Quote string
+	// Seq is the room's sequence number for the message, 0 while it is
+	// not known yet (a message you just sent, before the server's ack).
+	Seq int64
+	// System marks a line the app wrote itself ("alice joined"), not a
+	// person.
+	System bool
 }
 
 // ContactKey identifies a chat thread by the contact's static X25519
@@ -67,6 +85,99 @@ func (s *Store) Append(contact ContactKey, msg Message) {
 		s.order = append(s.order, contact)
 	}
 	s.threads[contact] = append(s.threads[contact], msg)
+}
+
+// AppendOrdered adds a room message, placing it by sequence number so
+// everyone sees the room's one agreed order even if frames arrive out of
+// order. A message with no Seq yet (your own, awaiting its ack) goes at
+// the end, and incoming ones slot in before such unacknowledged messages
+// of yours. Without a Seq it is the same as Append.
+func (s *Store) AppendOrdered(contact ContactKey, msg Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.threads[contact]; !ok {
+		s.order = append(s.order, contact)
+	}
+	s.threads[contact] = insertBySeq(s.threads[contact], msg)
+}
+
+// insertBySeq puts msg where its Seq belongs: after every message with a
+// lower Seq and any system line, before any message with a higher one.
+// Your own unacknowledged messages (no Seq yet, sent by you) don't count
+// as "lower" - they are newer than anything that has a number.
+func insertBySeq(msgs []Message, msg Message) []Message {
+	idx := len(msgs)
+	if msg.Seq > 0 {
+		for idx > 0 {
+			prev := msgs[idx-1]
+			unacked := prev.Seq == 0 && prev.Outgoing && !prev.System
+			if unacked || prev.Seq > msg.Seq {
+				idx--
+				continue
+			}
+			break
+		}
+	}
+	msgs = append(msgs, Message{})
+	copy(msgs[idx+1:], msgs[idx:])
+	msgs[idx] = msg
+	return msgs
+}
+
+// SetSeq records the sequence number the server gave the message with the
+// given id (the room_ack for a message you sent) and moves it into place.
+// It reports whether such a message was found.
+func (s *Store) SetSeq(contact ContactKey, id string, seq int64) bool {
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs := s.threads[contact]
+	for i := range msgs {
+		if msgs[i].ID != id {
+			continue
+		}
+		m := msgs[i]
+		m.Seq = seq
+		rest := append(msgs[:i:i], msgs[i+1:]...)
+		s.threads[contact] = insertBySeq(rest, m)
+		return true
+	}
+	return false
+}
+
+// FindByID returns a copy of the message with the given id.
+func (s *Store) FindByID(contact ContactKey, id string) (Message, bool) {
+	if id == "" {
+		return Message{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.threads[contact] {
+		if m.ID == id {
+			m.Body = append([]byte(nil), m.Body...)
+			return m, true
+		}
+	}
+	return Message{}, false
+}
+
+// Delete wipes one thread (zeroing its bytes) and removes it from the
+// thread list - what ending or leaving a room does.
+func (s *Store) Delete(contact ContactKey) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.threads[contact] {
+		zero(s.threads[contact][i].Body)
+	}
+	delete(s.threads, contact)
+	for i, c := range s.order {
+		if c == contact {
+			s.order = append(s.order[:i:i], s.order[i+1:]...)
+			break
+		}
+	}
 }
 
 // Messages returns a copy of contact's message history, oldest first,

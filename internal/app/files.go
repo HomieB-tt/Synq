@@ -234,6 +234,8 @@ func (m *Model) sendFileCmd(path string) (string, tea.Cmd) {
 	switch {
 	case m.activeTab != tabChat || m.chatActive == "":
 		return "Open a chat first (:chat <username>), then :send <path>.", nil
+	case isRoomThread(m.chatActive):
+		return "Files can't be shared in a room yet - send one in a 1:1 chat for now.", nil
 	case m.apiClient == nil || m.accessToken == "":
 		return "Sending files needs you to be logged in to synq-server.", nil
 	case m.fileSession == "":

@@ -99,7 +99,7 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 	// Now that there's an access token, start the WS connection the
 	// same way Init does at startup - this is the only other place
 	// that can transition "no token" into "should be connected".
-	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd(), m.fetchFeedCmd(0))
+	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd(), m.fetchRoomsCmd(), m.fetchFeedCmd(0))
 }
 
 // --- :login (manual) ---
@@ -163,6 +163,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
 		m.startFileSession(),
 		m.fetchNodesCmd(),
+		m.fetchRoomsCmd(),
 		m.fetchFeedCmd(0),
 	)
 }
@@ -233,6 +234,7 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	// What this launch received is wiped now rather than left lying
 	// around for whoever logs in next.
 	m.nodes = nil
+	m.wipeRooms()
 	m.unread, m.deferredFrames, m.resolvingSenders = nil, nil, nil
 	m.nodesLoaded = false
 	m.nodesErr = ""
@@ -397,6 +399,11 @@ type chatResolveResultMsg struct {
 	// message came from, which the lookup has to agree with.
 	background bool
 	senderID   string
+
+	// roomInvite, when set, is the id of a room this lookup is for: the
+	// owner is inviting username and needs their keys (see rooms.go).
+	// Like background, it must not open a thread.
+	roomInvite string
 }
 
 // resolveChatContactCmd looks up username's public keys so :chat can
@@ -420,6 +427,9 @@ func resolveChatContactCmd(apiClient *api.Client, accessToken, username string) 
 // opens either way, but a key that contradicts the pin opens it with
 // sends blocked, not silently trusted.
 func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
+	if msg.roomInvite != "" {
+		return m.handleRoomInviteResolved(msg)
+	}
 	if msg.background {
 		return m.handleSenderResolved(msg)
 	}

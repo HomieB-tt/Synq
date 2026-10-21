@@ -2,6 +2,7 @@ package room
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,9 +11,11 @@ import (
 )
 
 type member struct {
-	id   string
-	priv ed25519.PrivateKey
-	peer Peer
+	id      string
+	priv    ed25519.PrivateKey
+	boxPriv [32]byte
+	boxPub  [32]byte
+	peer    Peer
 }
 
 func newMember(t *testing.T, id, name string) member {
@@ -21,7 +24,15 @@ func newMember(t *testing.T, id, name string) member {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return member{id: id, priv: priv, peer: Peer{ID: id, Username: name, SignKey: hex.EncodeToString(pub)}}
+	bp, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := member{id: id, priv: priv}
+	copy(m.boxPriv[:], bp.Bytes())
+	copy(m.boxPub[:], bp.PublicKey().Bytes())
+	m.peer = Peer{ID: id, Username: name, SignKey: hex.EncodeToString(pub), Box: hex.EncodeToString(m.boxPub[:])}
+	return m
 }
 
 // setup makes an owner's room with two members who have received its state.
@@ -234,9 +245,15 @@ func TestDecodeStateValidates(t *testing.T) {
 		"short key":    func(s *State) { s.Key = make([]byte, 16) },
 		"empty roster": func(s *State) { s.Roster = nil },
 		"no owner":     func(s *State) { s.Owner = "someone-else" },
-		"bad sign key": func(s *State) { s.Roster = []Peer{{ID: "o", Username: "olive", SignKey: "zz"}} },
-		"dup id":       func(s *State) { s.Roster = []Peer{owner.peer, owner.peer} },
-		"ctrl name":    func(s *State) { s.Roster = []Peer{{ID: "o", Username: "a\nb", SignKey: owner.peer.SignKey}} },
+		"bad sign key": func(s *State) { s.Roster = []Peer{{ID: "o", Username: "olive", SignKey: "zz", Box: owner.peer.Box}} },
+		"bad box key": func(s *State) {
+			s.Roster = []Peer{{ID: "o", Username: "olive", SignKey: owner.peer.SignKey, Box: "zz"}}
+		},
+		"no box key": func(s *State) { s.Roster = []Peer{{ID: "o", Username: "olive", SignKey: owner.peer.SignKey}} },
+		"dup id":     func(s *State) { s.Roster = []Peer{owner.peer, owner.peer} },
+		"ctrl name": func(s *State) {
+			s.Roster = []Peer{{ID: "o", Username: "a\nb", SignKey: owner.peer.SignKey, Box: owner.peer.Box}}
+		},
 	}
 	for name, mutate := range bad {
 		s := good
@@ -257,7 +274,7 @@ func TestRosterTooBigIsRefused(t *testing.T) {
 	owner := newMember(t, "o", "olive")
 	roster := []Peer{owner.peer}
 	for i := 0; i < MaxMembers; i++ {
-		roster = append(roster, Peer{ID: string(rune('a' + i)), Username: "u", SignKey: owner.peer.SignKey})
+		roster = append(roster, Peer{ID: string(rune('a' + i)), Username: "u", SignKey: owner.peer.SignKey, Box: owner.peer.Box})
 	}
 	wire, _ := EncodeState(State{Room: "r", Name: "n", Owner: "o", Gen: 1, Key: make([]byte, 32), Roster: roster})
 	if _, err := DecodeState(wire); err == nil {
@@ -345,4 +362,149 @@ func TestMessageIDsAreValidAndUnique(t *testing.T) {
 	if ValidID("") || ValidID(strings.Repeat("g", 32)) || ValidID(a+"0") {
 		t.Fatal("bad ids accepted")
 	}
+}
+
+// --- direct channel, rekey, handover ---
+
+func TestDirectPayloadsRoundTripBetweenTwoKeyHolders(t *testing.T) {
+	owner := newMember(t, "o", "olive")
+	alice := newMember(t, "a", "alice")
+	sealed, err := SealDirect(&owner.boxPriv, &alice.boxPub, "room1", []byte("the key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := OpenDirect(&alice.boxPriv, &owner.boxPub, "room1", sealed)
+	if err != nil || string(got) != "the key" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if bytes.Contains(sealed, []byte("the key")) {
+		t.Fatal("payload is not encrypted")
+	}
+}
+
+func TestDirectPayloadsAreBoundToRoomAndDirection(t *testing.T) {
+	owner := newMember(t, "o", "olive")
+	alice := newMember(t, "a", "alice")
+	mallory := newMember(t, "m", "mallory")
+	sealed, _ := SealDirect(&owner.boxPriv, &alice.boxPub, "room1", []byte("x"))
+
+	if _, err := OpenDirect(&alice.boxPriv, &owner.boxPub, "room2", sealed); err == nil {
+		t.Fatal("opened under another room id")
+	}
+	// Reflected back at the sender as if alice had sent it.
+	if _, err := OpenDirect(&owner.boxPriv, &alice.boxPub, "room1", sealed); err == nil {
+		t.Fatal("reflected payload opened")
+	}
+	// Someone else can't open it, nor claim to be the sender.
+	if _, err := OpenDirect(&mallory.boxPriv, &owner.boxPub, "room1", sealed); err == nil {
+		t.Fatal("a third party opened it")
+	}
+	if _, err := OpenDirect(&alice.boxPriv, &mallory.boxPub, "room1", sealed); err == nil {
+		t.Fatal("opened as if from someone else")
+	}
+	sealed[len(sealed)-1] ^= 1
+	if _, err := OpenDirect(&alice.boxPriv, &owner.boxPub, "room1", sealed); err == nil {
+		t.Fatal("tampered payload opened")
+	}
+	if _, err := OpenDirect(&alice.boxPriv, &owner.boxPub, "room1", []byte("short")); err == nil {
+		t.Fatal("short payload opened")
+	}
+}
+
+func TestRekeyLocksOutSomeoneWhoLeft(t *testing.T) {
+	owner, alice, bob, ro, ra, rb := setup(t)
+	before := seal(t, ro, owner, "", "before")
+
+	// bob is removed; the owner rotates and tells alice only.
+	ro.RemovePeer(bob.id)
+	if err := ro.Rekey(); err != nil {
+		t.Fatal(err)
+	}
+	if ro.Gen != 2 {
+		t.Fatalf("gen = %d", ro.Gen)
+	}
+	st, _ := ro.State()
+	if _, err := ra.ApplyState(owner.id, st); err != nil {
+		t.Fatal(err)
+	}
+
+	after := seal(t, ro, owner, "", "after")
+	if _, res := ra.Receive(owner.id, 2, after); res != Accepted {
+		t.Fatalf("alice could not read the new key's message: %v", res)
+	}
+	if _, res := rb.Receive(owner.id, 2, after); res != Rejected {
+		t.Fatalf("bob read a message sent after he was removed: %v", res)
+	}
+	// A message sealed just before the rotation still reads for alice.
+	if _, res := ra.Receive(owner.id, 1, before); res != Accepted {
+		t.Fatalf("in-flight message lost across the rotation: %v", res)
+	}
+	_ = alice
+}
+
+func TestThePreviousKeyIsDroppedAtTheNextRotation(t *testing.T) {
+	owner, _, _, ro, ra, _ := setup(t)
+	old := seal(t, ro, owner, "", "old")
+	for i := 0; i < 2; i++ {
+		if err := ro.Rekey(); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := ro.State()
+		if _, err := ra.ApplyState(owner.id, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, res := ra.Receive(owner.id, 1, old); res != Rejected {
+		t.Fatalf("two generations back still opened: %v", res)
+	}
+}
+
+func TestSetOwnerOnlyAcceptsSomeoneOnTheRoster(t *testing.T) {
+	owner, alice, _, _, ra, _ := setup(t)
+	if err := ra.SetOwner("stranger"); err == nil {
+		t.Fatal("a stranger became owner")
+	}
+	if ra.OwnerID != owner.id {
+		t.Fatal("owner changed despite refusal")
+	}
+	if err := ra.SetOwner(alice.id); err != nil {
+		t.Fatal(err)
+	}
+	if ra.OwnerID != alice.id {
+		t.Fatal("owner not updated")
+	}
+}
+
+func TestANewOwnerCanRekeyAndServeTheRoomItAlreadyHolds(t *testing.T) {
+	owner, alice, bob, _, ra, rb := setup(t)
+	// The handover: everyone adopts alice as owner.
+	for _, r := range []*Room{ra, rb} {
+		if err := r.SetOwner(alice.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// alice already holds key and roster, so she can hand out a new key
+	// without any help from the old owner.
+	if err := ra.Rekey(); err != nil {
+		t.Fatal(err)
+	}
+	ra.RemovePeer(owner.id)
+	st, err := ra.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Owner != alice.id {
+		t.Fatalf("state names owner %q", st.Owner)
+	}
+	if _, err := rb.ApplyState(alice.id, st); err != nil {
+		t.Fatal(err)
+	}
+	if _, res := rb.Receive(alice.id, 1, seal(t, ra, alice, "", "hi from the new owner")); res != Accepted {
+		t.Fatalf("bob could not read the new owner: %v", res)
+	}
+	// The old owner's state no longer counts.
+	if _, err := rb.ApplyState(owner.id, st); err == nil {
+		t.Fatal("the former owner's state was accepted")
+	}
+	_ = bob
 }

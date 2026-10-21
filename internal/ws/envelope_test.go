@@ -194,6 +194,16 @@ func TestRoomFramesDecode(t *testing.T) {
 			func(e Event) bool { return e.Type == EventTypeRoomJoined && e.User == "u2" }},
 		{"left", `{"type":"room_left","room":"r1","user":"u2"}`,
 			func(e Event) bool { return e.Type == EventTypeRoomLeft && e.User == "u2" }},
+		{"direct", `{"type":"room_direct","room":"r1","from":"u1","payload":"AAE="}`,
+			func(e Event) bool {
+				return e.Type == EventTypeRoomDirect && e.Room == "r1" && e.From == "u1" && bytes.Equal(e.Payload, []byte{0, 1})
+			}},
+		{"offer", `{"type":"room_transfer_offer","room":"r1","from":"u1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomTransferOffer && e.Room == "r1" && e.From == "u1" }},
+		{"cancelled", `{"type":"room_transfer_cancelled","room":"r1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomTransferCancelled && e.Room == "r1" }},
+		{"owner changed", `{"type":"room_owner_changed","room":"r1","owner":"u2","from":"u1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomOwnerChanged && e.Owner == "u2" && e.From == "u1" }},
 		{"ended", `{"type":"room_ended","room":"r1","reason":"owner_gone"}`,
 			func(e Event) bool { return e.Room == "r1" && e.Reason == "owner_gone" }},
 	}
@@ -217,6 +227,11 @@ func TestMalformedRoomFramesAreErrors(t *testing.T) {
 		`{"type":"room_message","room":"r","seq":1,"from":"u","payload":"!!"}`,
 		`{"type":"room_ack","room":"r","seq":1}`,
 		`{"type":"room_invite","room":"r"}`,
+		`{"type":"room_direct","from":"u","payload":"AA=="}`,
+		`{"type":"room_direct","room":"r","from":"u"}`,
+		`{"type":"room_transfer_offer","room":"r"}`,
+		`{"type":"room_transfer_cancelled"}`,
+		`{"type":"room_owner_changed","room":"r"}`,
 		`{"type":"room_joined","room":"r"}`,
 		`{"type":"room_ended"}`,
 	} {
@@ -246,5 +261,21 @@ func TestEncodeRoomSendShape(t *testing.T) {
 	}
 	if _, err := EncodeRoomSend("r", "", nil); err == nil {
 		t.Error("empty cid accepted")
+	}
+}
+
+func TestEncodeRoomDirect(t *testing.T) {
+	b, err := EncodeRoomDirect("r1", "u2", []byte{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"to":"u2","room":"r1","payload":"AAE="}` {
+		t.Fatalf("frame = %s", b)
+	}
+	if _, err := EncodeRoomDirect("", "u2", nil); err == nil {
+		t.Fatal("empty room accepted")
+	}
+	if _, err := EncodeRoomDirect("r1", "", nil); err == nil {
+		t.Fatal("empty recipient accepted")
 	}
 }

@@ -5,9 +5,10 @@
 // testable on its own. See ROOMS.md in synq-server for the model.
 //
 // Crypto, in one paragraph. The owner makes a random 256-bit room key and
-// sends it to each member inside the existing pairwise end-to-end channel
-// (so it is authenticated as coming from the owner), together with the
-// roster of members' Ed25519 keys. A room message is signed by its author
+// sends it to each member over a server-relayed direct channel, sealed with
+// the two ends' static X25519 keys (so it is authenticated as coming from
+// the owner, and needs no earlier chat between them), together with the
+// roster of members' Ed25519 and X25519 keys. A room message is signed by its author
 // and then sealed under the room key with AES-256-GCM. The server relays
 // the sealed bytes and names the sender; the receiver checks the signature
 // against the roster key of *that* sender, so the server can neither read
@@ -19,12 +20,16 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"unicode"
 	"unicode/utf8"
 )
@@ -228,10 +233,11 @@ type Peer struct {
 	ID       string `json:"id"`
 	Username string `json:"u"`
 	SignKey  string `json:"k"` // hex Ed25519 public key
+	Box      string `json:"b"` // hex X25519 public key (direct channel)
 }
 
 // State is everything a member needs to take part: sent by the owner,
-// over the pairwise channel, whenever the key or the roster changes.
+// over the direct channel, whenever the key or the roster changes.
 type State struct {
 	Room   string `json:"room"`
 	Name   string `json:"name"`
@@ -241,8 +247,8 @@ type State struct {
 	Roster []Peer `json:"roster"`
 }
 
-// IsControl reports whether a decrypted pairwise body is a room control
-// message rather than chat text.
+// IsControl reports whether a decrypted direct body is a room control
+// message.
 func IsControl(body []byte) bool { return bytes.HasPrefix(body, controlMagic) }
 
 // EncodeState builds the control message for st.
@@ -291,6 +297,9 @@ func DecodeState(body []byte) (State, error) {
 		if k, err := hex.DecodeString(p.SignKey); err != nil || len(k) != ed25519.PublicKeySize {
 			return st, errors.New("room: roster has a bad signing key")
 		}
+		if k, err := hex.DecodeString(p.Box); err != nil || len(k) != 32 {
+			return st, errors.New("room: roster has a bad box key")
+		}
 		if p.ID == st.Owner {
 			ownerListed = true
 		}
@@ -299,6 +308,85 @@ func DecodeState(body []byte) (State, error) {
 		return st, errors.New("room: roster does not include the owner")
 	}
 	return st, nil
+}
+
+// --- the direct channel ---
+
+// A direct payload is sealed under a key both ends can compute from their
+// static X25519 keys: HKDF-SHA256 of the shared secret, with the room id and
+// both public keys (sorted, so both ends agree) as context. The additional
+// data names the room, the sender and the recipient, so a payload can't be
+// replayed into another room or reflected back at its sender. Only the two
+// holders of the private keys can make or read one, which is what makes the
+// owner's state authentic without any signature of its own.
+
+const directDomain = "synq-room-direct-v1\x00"
+
+// ErrDirectUndecryptable means a direct payload didn't open.
+var ErrDirectUndecryptable = errors.New("room: direct payload did not open")
+
+func directAEAD(myPriv, theirPub *[32]byte, roomID string) (cipher.AEAD, [32]byte, error) {
+	var myPub [32]byte
+	priv, err := ecdh.X25519().NewPrivateKey(myPriv[:])
+	if err != nil {
+		return nil, myPub, err
+	}
+	copy(myPub[:], priv.PublicKey().Bytes())
+	peer, err := ecdh.X25519().NewPublicKey(theirPub[:])
+	if err != nil {
+		return nil, myPub, err
+	}
+	secret, err := priv.ECDH(peer)
+	if err != nil {
+		return nil, myPub, err
+	}
+	pubs := [][]byte{myPub[:], theirPub[:]}
+	sort.Slice(pubs, func(i, j int) bool { return bytes.Compare(pubs[i], pubs[j]) < 0 })
+	info := directDomain + roomID + "\x00" + string(pubs[0]) + string(pubs[1])
+	key, err := hkdf.Key(sha256.New, secret, nil, info, 32)
+	if err != nil {
+		return nil, myPub, err
+	}
+	var k Key
+	copy(k[:], key)
+	g, err := aead(&k)
+	return g, myPub, err
+}
+
+func directAAD(roomID string, sender, recipient *[32]byte) []byte {
+	b := []byte(directDomain + roomID + "\x00")
+	b = append(b, sender[:]...)
+	return append(b, recipient[:]...)
+}
+
+// SealDirect seals plain for the holder of theirPub. The result is
+// nonce || ciphertext.
+func SealDirect(myPriv, theirPub *[32]byte, roomID string, plain []byte) ([]byte, error) {
+	g, myPub, err := directAEAD(myPriv, theirPub, roomID)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, g.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return g.Seal(nonce, nonce, plain, directAAD(roomID, &myPub, theirPub)), nil
+}
+
+// OpenDirect opens a payload that theirPub's holder sealed for us.
+func OpenDirect(myPriv, theirPub *[32]byte, roomID string, sealed []byte) ([]byte, error) {
+	g, myPub, err := directAEAD(myPriv, theirPub, roomID)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed) < g.NonceSize()+g.Overhead() {
+		return nil, ErrDirectUndecryptable
+	}
+	plain, err := g.Open(nil, sealed[:g.NonceSize()], sealed[g.NonceSize():], directAAD(roomID, theirPub, &myPub))
+	if err != nil {
+		return nil, ErrDirectUndecryptable
+	}
+	return plain, nil
 }
 
 // --- per-room state machine ---
@@ -343,6 +431,12 @@ type Room struct {
 	Gen    int
 	Roster map[string]Peer
 
+	// prev is the key of the generation before the current one. Messages
+	// sent just before a rotation are still in flight when it happens, so
+	// they are still read; it is dropped at the next rotation.
+	prev    *Key
+	prevGen int
+
 	seen map[string]bool
 	held []heldFrame
 }
@@ -356,9 +450,9 @@ func New(id, name, ownerID string) *Room {
 func (r *Room) Ready() bool { return r.Key != nil }
 
 // ApplyState installs the owner's state. It is refused unless `from` is
-// the owner (the control message arrives over a channel authenticated as
-// `from`), it is for this room, and it is not older than what is held.
-// Messages held while waiting are returned if they can now be accepted.
+// the owner (the direct channel authenticates the sender as `from`), it is
+// for this room, and it is not older than what is held. Messages held while
+// waiting are returned if they can now be accepted.
 func (r *Room) ApplyState(from string, st State) ([]Received, error) {
 	if from != r.OwnerID || st.Owner != r.OwnerID {
 		return nil, errors.New("room: state did not come from the owner")
@@ -371,6 +465,10 @@ func (r *Room) ApplyState(from string, st State) ([]Received, error) {
 	}
 	var k Key
 	copy(k[:], st.Key)
+	if r.Key != nil && st.Gen > r.Gen {
+		old := *r.Key
+		r.prev, r.prevGen = &old, r.Gen
+	}
 	r.Key = &k
 	r.Gen = st.Gen
 	r.Name = st.Name
@@ -388,6 +486,34 @@ func (r *Room) SetOwnerState(key Key, self Peer) {
 	r.Key = &key
 	r.Gen = 1
 	r.Roster = map[string]Peer{self.ID: self}
+}
+
+// Rekey rotates to a fresh key (owner side), so that someone who has just
+// left or been removed can't read anything sent from now on. The old key
+// is kept for messages already in flight.
+func (r *Room) Rekey() error {
+	k, err := NewKey()
+	if err != nil {
+		return err
+	}
+	if r.Key != nil {
+		old := *r.Key
+		r.prev, r.prevGen = &old, r.Gen
+	}
+	r.Key = &k
+	r.Gen++
+	return nil
+}
+
+// SetOwner records a change of owner. It is refused unless the new owner is
+// already on the roster: the server announces handovers, and this is what
+// stops a bare announcement from installing a stranger.
+func (r *Room) SetOwner(id string) error {
+	if _, ok := r.Roster[id]; !ok {
+		return errors.New("room: new owner is not on the roster")
+	}
+	r.OwnerID = id
+	return nil
 }
 
 // AddPeer adds or replaces a roster entry (owner side).
@@ -427,6 +553,9 @@ func (r *Room) Receive(from string, seq int64, sealed []byte) (Received, Result)
 		return Received{}, Held
 	}
 	msg, err := Open(r.Key, r.ID, r.Gen, sealed)
+	if err != nil && r.prev != nil {
+		msg, err = Open(r.prev, r.ID, r.prevGen, sealed)
+	}
 	if err != nil {
 		return Received{}, Rejected
 	}
@@ -471,6 +600,12 @@ func (r *Room) Wipe() {
 			r.Key[i] = 0
 		}
 		r.Key = nil
+	}
+	if r.prev != nil {
+		for i := range r.prev {
+			r.prev[i] = 0
+		}
+		r.prev = nil
 	}
 	r.held = nil
 	r.seen = map[string]bool{}

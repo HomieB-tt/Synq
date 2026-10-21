@@ -85,9 +85,9 @@ var commandSpecs = []cmdSpec{
 		detail: "Choose the folder that saved files are written to. Nothing is saved until you choose to, and saving never overwrites an existing file.",
 		prompt: "Folder for saved files", hint: "A folder that already exists. It is kept between launches."},
 
-	{name: roomCommandName, usage: "<new|invite|accept|leave|end|members|list> ...", group: grpChat, fill: true,
+	{name: roomCommandName, usage: "<new|invite|accept|decline|leave|kick|transfer|end|members|list> ...", group: grpChat, fill: true,
 		brief:  "group chat: make or manage a room",
-		detail: "Rooms are small, invite-only group chats of up to 16 people. :room new <name> makes one and you own it; :room invite <username> invites someone you are connected to; they join with :room accept <name>. Everyone's messages are end-to-end encrypted, and Ctrl+R in a room replies to a message. A room lasts only while its owner is here: :room end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it."},
+		detail: "Rooms are small, invite-only group chats of up to 16 people. :room new <name> makes one and you own it; :room invite <username> invites someone you are connected to; they join with :room accept <name>. Everyone's messages are end-to-end encrypted, and Ctrl+R in a room replies to a message. The owner can remove someone with :room kick <username> (the room key is changed so they can read nothing new) and hand the room to a member with :room transfer <username>, who takes it with :room accept (or refuses with :room decline). A room lasts only while its owner is here: :room end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
 
 	// --- feed ---
 	{name: "post", usage: "[category]", group: grpFeed,

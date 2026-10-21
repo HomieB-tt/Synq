@@ -18,7 +18,6 @@ import (
 const (
 	testRoomID  = "r1"
 	testOwnerID = "owner-id"
-	ownerThread = chat.ContactKey("owner-contact")
 )
 
 func roomTestModel(t *testing.T, username string) Model {
@@ -55,22 +54,27 @@ func ownerModel(t *testing.T) Model {
 	return next.(Model)
 }
 
-// memberModel is a member who accepted an invitation to r1 and knows the
-// owner as a contact.
+// memberModel is a member who accepted an invitation to r1.
 func memberModel(t *testing.T, username string) Model {
 	t.Helper()
 	m := roomTestModel(t, username)
-	m.rememberContact(ownerThread, "olive", testOwnerID)
 	m.putRoom(&roomEntry{r: room.New(testRoomID, "standup", testOwnerID), joined: true})
 	return m
 }
 
-// admit adds a member to the owner's roster and returns the control
-// message the owner would now send everyone.
-func admit(t *testing.T, owner *Model, id, name string, m Model) []byte {
+func peerOf(id, name string, m Model) room.Peer {
+	return room.Peer{
+		ID: id, Username: name,
+		SignKey: hex.EncodeToString(m.identity.SigningPublic),
+		Box:     hex.EncodeToString(m.identity.BoxPublic[:]),
+	}
+}
+
+// stateFor is the direct frame the owner would now send `to`: the current
+// key and roster, sealed to that member's box key.
+func stateFor(t *testing.T, owner Model, to Model) ws.Event {
 	t.Helper()
 	e := owner.roomEntryFor(testRoomID)
-	e.r.AddPeer(room.Peer{ID: id, Username: name, SignKey: hex.EncodeToString(m.identity.SigningPublic)})
 	st, err := e.r.State()
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +83,25 @@ func admit(t *testing.T, owner *Model, id, name string, m Model) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return wire
+	sealed, err := room.SealDirect(owner.identity.BoxPrivate, to.identity.BoxPublic, testRoomID, wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws.Event{Type: ws.EventTypeRoomDirect, Room: testRoomID, From: owner.roomSelf(e), Payload: sealed}
+}
+
+// admit adds a member to the owner's roster and returns the direct frame
+// the owner would now send them. It also gives the member the owner's keys
+// as they would have verified them when accepting the invitation.
+func admit(t *testing.T, owner *Model, id, name string, m Model) ws.Event {
+	t.Helper()
+	e := owner.roomEntryFor(testRoomID)
+	e.r.AddPeer(peerOf(id, name, m))
+	if me := m.roomEntryFor(testRoomID); me != nil {
+		me.ownerBox = hex.EncodeToString(owner.identity.BoxPublic[:])
+		me.ownerSign = hex.EncodeToString(owner.identity.SigningPublic)
+	}
+	return stateFor(t, *owner, m)
 }
 
 func lastBody(m Model, th chat.ContactKey) string {
@@ -127,7 +149,7 @@ func TestAMemberGetsReadyWhenTheOwnersKeyArrives(t *testing.T) {
 	if bob.roomEntryFor(testRoomID).r.Ready() {
 		t.Fatal("ready before any key")
 	}
-	bob.receiveRoomControl(ownerThread, wire)
+	bob.handleRoomDirect(wire)
 	e := bob.roomEntryFor(testRoomID)
 	if !e.r.Ready() || !e.ready {
 		t.Fatal("key did not arrive")
@@ -142,9 +164,8 @@ func TestRoomStateFromANonOwnerIsIgnored(t *testing.T) {
 	bob := memberModel(t, "bob")
 	wire := admit(t, &owner, "bob-id", "bob", bob)
 
-	mallory := chat.ContactKey("mallory-contact")
-	bob.rememberContact(mallory, "mallory", "mallory-id")
-	bob.receiveRoomControl(mallory, wire)
+	wire.From = "mallory-id"
+	bob.handleRoomDirect(wire)
 	if bob.roomEntryFor(testRoomID).r.Ready() {
 		t.Fatal("a stranger handed this member a room key")
 	}
@@ -153,9 +174,8 @@ func TestRoomStateFromANonOwnerIsIgnored(t *testing.T) {
 func TestRoomStateForARoomWeAreNotInIsIgnored(t *testing.T) {
 	owner := ownerModel(t)
 	carol := roomTestModel(t, "carol")
-	carol.rememberContact(ownerThread, "olive", testOwnerID)
 	wire := admit(t, &owner, "carol-id", "carol", carol)
-	carol.receiveRoomControl(ownerThread, wire)
+	carol.handleRoomDirect(wire)
 	if len(carol.rooms) != 0 || carol.chatStore.HasThread(roomThread(testRoomID)) {
 		t.Fatal("unsolicited room state created a room")
 	}
@@ -167,9 +187,9 @@ func twoMembers(t *testing.T) (owner, alice, bob Model) {
 	owner = ownerModel(t)
 	alice, bob = memberModel(t, "alice"), memberModel(t, "bob")
 	admit(t, &owner, "alice-id", "alice", alice)
-	wire := admit(t, &owner, "bob-id", "bob", bob)
-	alice.receiveRoomControl(ownerThread, wire)
-	bob.receiveRoomControl(ownerThread, wire)
+	bobWire := admit(t, &owner, "bob-id", "bob", bob)
+	alice.handleRoomDirect(stateFor(t, owner, alice))
+	bob.handleRoomDirect(bobWire)
 	return
 }
 
@@ -420,12 +440,11 @@ func TestAJoinFromSomeoneNotInvitedHereGetsNoKey(t *testing.T) {
 func TestAnInvitedPersonJoiningJoinsTheRosterAndTriggersKeyDelivery(t *testing.T) {
 	owner := withClient(t, ownerModel(t))
 	bob := roomTestModel(t, "bob")
-	contact := chat.ContactKey("bob-contact")
-	owner.rememberContact(contact, "bob", "bob-id")
 	e := owner.roomEntryFor(testRoomID)
 	e.peers = map[string]roomPeer{"bob-id": {
-		userID: "bob-id", username: "bob", contact: contact,
+		userID: "bob-id", username: "bob",
 		signKey: hex.EncodeToString(bob.identity.SigningPublic),
+		box:     hex.EncodeToString(bob.identity.BoxPublic[:]),
 	}}
 
 	cmd := owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomJoined, Room: testRoomID, User: "bob-id"})
@@ -444,14 +463,13 @@ func TestLeavingRemovesAMemberFromTheOwnersRoster(t *testing.T) {
 	owner, _, _ := twoMembers(t)
 	owner = withClient(t, owner)
 	e := owner.roomEntryFor(testRoomID)
-	e.peers = map[string]roomPeer{"bob-id": {userID: "bob-id", username: "bob", contact: "bob-contact"}}
-	owner.rememberContact("bob-contact", "bob", "bob-id")
+	e.peers = map[string]roomPeer{"bob-id": {userID: "bob-id", username: "bob"}}
 
 	owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomLeft, Room: testRoomID, User: "bob-id"})
 	if _, in := e.r.Roster["bob-id"]; in {
 		t.Fatal("bob is still on the roster")
 	}
-	if !strings.Contains(lastBody(owner, roomThread(testRoomID)), "bob left") {
+	if !strings.Contains(lastBody(owner, roomThread(testRoomID)), "bob left - the key was changed") {
 		t.Fatalf("thread says %q", lastBody(owner, roomThread(testRoomID)))
 	}
 }
@@ -746,5 +764,332 @@ func TestRoomsAppearInTheChatListWithAuthorPreviews(t *testing.T) {
 func TestRoomCommandIsDocumented(t *testing.T) {
 	if _, ok := specByName(roomCommandName); !ok {
 		t.Fatalf("no command spec for :%s", roomCommandName)
+	}
+}
+
+// --- phase 2: the direct channel, rekeying, kicks and handovers ---
+
+func TestTheFirstStateMustDescribeTheOwnerByTheKeysWeVerified(t *testing.T) {
+	owner := ownerModel(t)
+	bob := memberModel(t, "bob")
+	wire := admit(t, &owner, "bob-id", "bob", bob)
+	bob.roomEntryFor(testRoomID).ownerSign = hex.EncodeToString(bob.identity.SigningPublic) // not the owner's
+
+	bob.handleRoomDirect(wire)
+	if bob.roomEntryFor(testRoomID).r.Ready() {
+		t.Fatal("accepted a state naming the owner with unverified keys")
+	}
+}
+
+func TestADirectFrameSealedByTheWrongKeyIsIgnored(t *testing.T) {
+	owner := ownerModel(t)
+	bob := memberModel(t, "bob")
+	mallory := roomTestModel(t, "mallory")
+	wire := admit(t, &owner, "bob-id", "bob", bob)
+	// Mallory seals the same state under her own key but claims to be the owner.
+	e := owner.roomEntryFor(testRoomID)
+	st, _ := e.r.State()
+	plain, _ := room.EncodeState(st)
+	sealed, _ := room.SealDirect(mallory.identity.BoxPrivate, bob.identity.BoxPublic, testRoomID, plain)
+	wire.Payload = sealed
+	bob.handleRoomDirect(wire)
+	if bob.roomEntryFor(testRoomID).r.Ready() {
+		t.Fatal("a state sealed by someone else was accepted as the owner's")
+	}
+}
+
+func TestAnOwnerDoesNotTakeStateFromAMember(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	before := owner.roomEntryFor(testRoomID).r.Gen
+	ev := stateFor(t, owner, alice)
+	ev.From = "alice-id"
+	owner.handleRoomDirect(ev)
+	if owner.roomEntryFor(testRoomID).r.Gen != before {
+		t.Fatal("the owner applied a state")
+	}
+}
+
+func TestSomeoneLeavingChangesTheKeyForEveryoneElse(t *testing.T) {
+	owner, alice, bob := twoMembers(t)
+	owner = withClient(t, owner)
+	oe := owner.roomEntryFor(testRoomID)
+	oldGen := oe.r.Gen
+
+	cmd := owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomLeft, Room: testRoomID, User: "bob-id"})
+	if oe.r.Gen != oldGen+1 {
+		t.Fatalf("gen = %d, want %d", oe.r.Gen, oldGen+1)
+	}
+	if cmd == nil {
+		t.Fatal("the new key was not sent to anyone")
+	}
+	// alice gets the new key; bob (who left) never does.
+	alice.handleRoomDirect(stateFor(t, owner, alice))
+	ev, _ := sealFrom(t, owner, "", "after bob left")
+	ev.From = testOwnerID
+	ev.Seq = 1
+	alice.handleRoomEvent(ev)
+	if lastBody(alice, roomThread(testRoomID)) != "after bob left" {
+		t.Fatalf("alice can't read the new key's message: %q", lastBody(alice, roomThread(testRoomID)))
+	}
+	bob.handleRoomEvent(ev)
+	if lastBody(bob, roomThread(testRoomID)) == "after bob left" {
+		t.Fatal("bob read a message sent after he left")
+	}
+}
+
+func TestAMemberLeavingDoesNotRekeyForAnInvitee(t *testing.T) {
+	owner := withClient(t, ownerModel(t))
+	oe := owner.roomEntryFor(testRoomID)
+	oe.peers = map[string]roomPeer{"pending-id": {userID: "pending-id", username: "pat"}}
+	gen := oe.r.Gen
+	owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomLeft, Room: testRoomID, User: "pending-id"})
+	if oe.r.Gen != gen {
+		t.Fatal("rekeyed because an invitation was withdrawn")
+	}
+}
+
+func TestARemovalReadsAsARemoval(t *testing.T) {
+	owner, _, _ := twoMembers(t)
+	owner = withClient(t, owner)
+	owner.roomEntryFor(testRoomID).removed = map[string]bool{"bob-id": true}
+	owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomLeft, Room: testRoomID, User: "bob-id"})
+	if !strings.Contains(lastBody(owner, roomThread(testRoomID)), "bob was removed") {
+		t.Fatalf("thread says %q", lastBody(owner, roomThread(testRoomID)))
+	}
+}
+
+func TestBeingRemovedOrWithdrawnEndsTheRoomHereWithTheRightWords(t *testing.T) {
+	for reason, want := range map[string]string{
+		"kicked":           "You were removed",
+		"invite_withdrawn": "withdrawn",
+		"owner_ended":      "the owner ended it",
+	} {
+		_, _, bob := twoMembers(t)
+		bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomEnded, Room: testRoomID, Reason: reason})
+		if bob.roomEntryFor(testRoomID) != nil || !strings.Contains(bob.commandMsg, want) {
+			t.Errorf("%s: msg %q, room kept %v", reason, bob.commandMsg, bob.roomEntryFor(testRoomID) != nil)
+		}
+	}
+}
+
+func TestAnOwnershipOfferIsShownAndCanBeWithdrawn(t *testing.T) {
+	_, _, bob := twoMembers(t)
+	bob = withClient(t, bob)
+	bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomTransferOffer, Room: testRoomID, From: testOwnerID})
+	e := bob.roomEntryFor(testRoomID)
+	if !e.offeredToMe || !strings.Contains(lastBody(bob, roomThread(testRoomID)), "accept") {
+		t.Fatalf("offer not shown: %v %q", e.offeredToMe, lastBody(bob, roomThread(testRoomID)))
+	}
+	if !strings.Contains(strings.Join(bob.roomStatusLines(testRoomID, 200), " "), "offered it to you") {
+		t.Fatal("status line doesn't mention the offer")
+	}
+	bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomTransferCancelled, Room: testRoomID})
+	if e.offeredToMe {
+		t.Fatal("offer not cleared")
+	}
+}
+
+func TestAnOfferFromSomeoneWhoIsNotTheOwnerIsIgnored(t *testing.T) {
+	_, _, bob := twoMembers(t)
+	bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomTransferOffer, Room: testRoomID, From: "alice-id"})
+	if bob.roomEntryFor(testRoomID).offeredToMe {
+		t.Fatal("an offer from a non-owner was believed")
+	}
+}
+
+func TestAcceptingAnOfferAsksTheServerAndInvitationsStillLookUpTheOwner(t *testing.T) {
+	_, _, bob := twoMembers(t)
+	bob = loggedIn(t, bob)
+	bob.chatActive = roomThread(testRoomID)
+	bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomTransferOffer, Room: testRoomID, From: testOwnerID})
+	res, cmd := bob.roomCommand([]string{"accept"})
+	if cmd == nil || !strings.Contains(res, "Taking over") {
+		t.Fatalf("accept of an offer: %q", res)
+	}
+	res, cmd = bob.roomCommand([]string{"decline"})
+	if cmd == nil || !strings.Contains(res, "Declining") {
+		t.Fatalf("decline of an offer: %q", res)
+	}
+}
+
+func TestAHandoverMakesTheNewOwnerOwnerAndTheOldOneAMember(t *testing.T) {
+	owner, alice, bob := twoMembers(t)
+	owner, alice, bob = withClient(t, owner), withClient(t, alice), withClient(t, bob)
+	owner.roomEntryFor(testRoomID).offeredTo = "alice-id"
+	ev := ws.Event{Type: ws.EventTypeRoomOwnerChanged, Room: testRoomID, Owner: "alice-id", From: testOwnerID}
+
+	owner.handleRoomEvent(ev)
+	alice.handleRoomEvent(ev)
+	bob.handleRoomEvent(ev)
+
+	if owner.roomEntryFor(testRoomID).owner || len(owner.ownedRooms()) != 0 {
+		t.Fatal("the old owner still owns it")
+	}
+	if !alice.roomEntryFor(testRoomID).owner || len(alice.ownedRooms()) != 1 {
+		t.Fatal("the new owner doesn't own it")
+	}
+	if bob.roomEntryFor(testRoomID).owner || bob.roomEntryFor(testRoomID).r.OwnerID != "alice-id" {
+		t.Fatal("a bystander's view is wrong")
+	}
+	if owner.roomEntryFor(testRoomID).offeredTo != "" {
+		t.Fatal("the offer outlived the handover")
+	}
+	// Quitting no longer ends the room for the old owner, and does for the new.
+	if next, cmd := owner.requestQuit(); !next.(Model).quitting || cmd == nil {
+		t.Fatal("the old owner is still asked before quitting")
+	}
+	if next, _ := alice.requestQuit(); !next.(Model).quitPrompt {
+		t.Fatal("the new owner isn't asked before quitting")
+	}
+}
+
+func TestTheNewOwnerCanServeTheRoomItAlreadyHolds(t *testing.T) {
+	owner, alice, bob := twoMembers(t)
+	alice, bob = withClient(t, alice), withClient(t, bob)
+	ev := ws.Event{Type: ws.EventTypeRoomOwnerChanged, Room: testRoomID, Owner: "alice-id", From: testOwnerID}
+	alice.handleRoomEvent(ev)
+	bob.handleRoomEvent(ev)
+	_ = owner
+
+	// A member leaves; the new owner rekeys and bob can follow it.
+	ae := alice.roomEntryFor(testRoomID)
+	cmd := alice.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomLeft, Room: testRoomID, User: testOwnerID})
+	if cmd == nil || ae.r.Gen < 2 {
+		t.Fatalf("new owner didn't rekey: gen %d", ae.r.Gen)
+	}
+	st, err := ae.r.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := room.EncodeState(st)
+	sealed, _ := room.SealDirect(alice.identity.BoxPrivate, bob.identity.BoxPublic, testRoomID, wire)
+	bob.handleRoomDirect(ws.Event{Type: ws.EventTypeRoomDirect, Room: testRoomID, From: "alice-id", Payload: sealed})
+	if bob.roomEntryFor(testRoomID).r.Gen != ae.r.Gen {
+		t.Fatal("bob did not take the new owner's key")
+	}
+}
+
+func TestAHandoverToSomeoneNotOnTheRosterIsIgnored(t *testing.T) {
+	_, _, bob := twoMembers(t)
+	bob.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomOwnerChanged, Room: testRoomID, Owner: "stranger-id", From: testOwnerID})
+	if bob.roomEntryFor(testRoomID).r.OwnerID != testOwnerID {
+		t.Fatal("a stranger was installed as owner")
+	}
+}
+
+func TestAHandoverBeforeOurKeyArrivedMakesUsStepOut(t *testing.T) {
+	m := loggedIn(t, memberModel(t, "bob"))
+	cmd := m.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomOwnerChanged, Room: testRoomID, Owner: "alice-id", From: testOwnerID})
+	if cmd == nil || !strings.Contains(m.commandMsg, "invited again") {
+		t.Fatalf("cmd=%v msg=%q", cmd != nil, m.commandMsg)
+	}
+}
+
+func TestKickAndTransferCommandsAreForTheOwnerAndNeedRealPeople(t *testing.T) {
+	owner, _, _ := twoMembers(t)
+	owner = loggedIn(t, owner)
+	owner.chatActive = roomThread(testRoomID)
+
+	if res, cmd := owner.roomCommand([]string{"kick", "bob"}); cmd == nil || !strings.Contains(res, "Removing bob") {
+		t.Errorf("kick: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"kick", "nobody"}); cmd != nil || !strings.Contains(res, "isn't in") {
+		t.Errorf("kick stranger: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"kick", "olive"}); cmd != nil || !strings.Contains(res, "That's you") {
+		t.Errorf("kick self: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"transfer", "alice"}); cmd == nil || !strings.Contains(res, "Offering") {
+		t.Errorf("transfer: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"transfer", "nobody"}); cmd != nil || !strings.Contains(res, "joined") {
+		t.Errorf("transfer to a stranger: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"transfer", "cancel"}); cmd != nil || !strings.Contains(res, "No ownership offer") {
+		t.Errorf("cancel with no offer: %q", res)
+	}
+	owner.roomEntryFor(testRoomID).offeredTo = "alice-id"
+	if _, cmd := owner.roomCommand([]string{"transfer", "cancel"}); cmd == nil {
+		t.Error("cancel with an offer did nothing")
+	}
+
+	_, _, bob := twoMembers(t)
+	bob = loggedIn(t, bob)
+	bob.chatActive = roomThread(testRoomID)
+	for _, args := range [][]string{{"kick", "alice"}, {"transfer", "alice"}} {
+		if res, cmd := bob.roomCommand(args); cmd != nil || !strings.Contains(res, "owner") {
+			t.Errorf("member %v: %q", args, res)
+		}
+	}
+}
+
+func TestTheOfferAndKickResultsUpdateTheRoom(t *testing.T) {
+	owner, _, _ := twoMembers(t)
+	owner = withClient(t, owner)
+	next, _ := owner.handleRoomOp(roomOpMsg{op: "offer", id: testRoomID, username: "alice", userID: "alice-id"})
+	owner = next.(Model)
+	e := owner.roomEntryFor(testRoomID)
+	if e.offeredTo != "alice-id" || !strings.Contains(strings.Join(owner.roomStatusLines(testRoomID, 200), " "), "offered to alice") {
+		t.Fatalf("offer not recorded: %q", e.offeredTo)
+	}
+	next, _ = owner.handleRoomOp(roomOpMsg{op: "cancel", id: testRoomID})
+	owner = next.(Model)
+	if owner.roomEntryFor(testRoomID).offeredTo != "" {
+		t.Fatal("withdrawal not recorded")
+	}
+	// Alice declining arrives as a cancellation event on the owner's side.
+	owner.roomEntryFor(testRoomID).offeredTo = "alice-id"
+	owner.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomTransferCancelled, Room: testRoomID})
+	if !strings.Contains(lastBody(owner, roomThread(testRoomID)), "alice declined") {
+		t.Fatalf("thread says %q", lastBody(owner, roomThread(testRoomID)))
+	}
+	next, _ = owner.handleRoomOp(roomOpMsg{op: "kick", id: testRoomID, username: "bob", userID: "bob-id"})
+	owner = next.(Model)
+	if !owner.roomEntryFor(testRoomID).removed["bob-id"] {
+		t.Fatal("removal not remembered")
+	}
+}
+
+func TestJoiningNeedsTheOwnersVerifiedKeys(t *testing.T) {
+	// Without a node entry for the owner we can't say who to look up.
+	m := loggedIn(t, roomTestModel(t, "bob"))
+	m.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomInvite, Room: testRoomID, Name: "standup", From: testOwnerID})
+	res, _ := m.roomCommand([]string{"accept", "standup"})
+	if !strings.Contains(res, "Can't tell who owns") {
+		t.Fatalf("res = %q", res)
+	}
+	m.nodes = []api.NodeRelationship{{RequesterID: testOwnerID, RequesterUsername: "olive", TargetID: "bob-id", TargetUsername: "bob", Status: api.NodeStatusActive}}
+	res, cmd := m.roomCommand([]string{"accept", "standup"})
+	if cmd == nil || !strings.Contains(res, "Checking olive's keys") {
+		t.Fatalf("res = %q", res)
+	}
+}
+
+func TestTheOwnersKeysMustBelongToTheUserWhoOwnsTheRoom(t *testing.T) {
+	m := newPinModel(t)
+	m.username = "bob"
+	m.theme = styles.Default()
+	m.putRoom(&roomEntry{r: room.New(testRoomID, "standup", testOwnerID)})
+	sg := newSigner(t)
+	box := randomKeyHex(t, 32)
+
+	good := lookupResult("olive", box, sg)
+	good.keys.UserID = testOwnerID
+	good.roomAccept = testRoomID
+	wrong := lookupResult("mallory", randomKeyHex(t, 32), newSigner(t))
+	wrong.keys.UserID = "someone-else"
+	wrong.roomAccept = testRoomID
+
+	next, cmd := m.handleChatResolveResult(wrong)
+	m = next.(Model)
+	if cmd != nil || m.roomEntryFor(testRoomID).ownerBox != "" || !strings.Contains(m.commandMsg, "isn't who the server says") {
+		t.Fatalf("wrong owner accepted: %q", m.commandMsg)
+	}
+	m = loggedIn(t, m)
+	next, cmd = m.handleChatResolveResult(good)
+	m = next.(Model)
+	e := m.roomEntryFor(testRoomID)
+	if cmd == nil || e.ownerBox != box || e.ownerSign != sg.hex() {
+		t.Fatalf("right owner refused: %q box=%q", m.commandMsg, e.ownerBox)
 	}
 }

@@ -404,6 +404,10 @@ type chatResolveResultMsg struct {
 	// owner is inviting username and needs their keys (see rooms.go).
 	// Like background, it must not open a thread.
 	roomInvite string
+
+	// roomAccept, when set, is the id of a room whose owner this lookup is
+	// for: an invitee checking the owner's keys before joining.
+	roomAccept string
 }
 
 // resolveChatContactCmd looks up username's public keys so :chat can
@@ -429,6 +433,9 @@ func resolveChatContactCmd(apiClient *api.Client, accessToken, username string) 
 func (m Model) handleChatResolveResult(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
 	if msg.roomInvite != "" {
 		return m.handleRoomInviteResolved(msg)
+	}
+	if msg.roomAccept != "" {
+		return m.handleRoomAcceptResolved(msg)
 	}
 	if msg.background {
 		return m.handleSenderResolved(msg)

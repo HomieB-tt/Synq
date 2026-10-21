@@ -61,7 +61,7 @@ type roomPeer struct {
 	userID   string
 	username string
 	signKey  string // hex Ed25519
-	contact  chat.ContactKey
+	box      string // hex X25519, for the direct channel
 }
 
 // roomEntry is one room as this client knows it.
@@ -73,6 +73,21 @@ type roomEntry struct {
 
 	// peers is the owner's table of people it invited, by user id.
 	peers map[string]roomPeer
+
+	// ownerBox and ownerSign are the owner's keys as this client looked
+	// them up (and verified) when accepting the invitation. The first state
+	// has to agree with them; after that the roster carries the keys.
+	ownerBox, ownerSign string
+
+	// offeredTo is the member the owner has offered the room to (owner
+	// side); offeredToMe is set while the owner has offered it to this
+	// client (member side).
+	offeredTo   string
+	offeredToMe bool
+
+	// removed remembers who the owner just removed, so their departure
+	// reads as a removal rather than someone leaving.
+	removed map[string]bool
 
 	// replyBack selects the message a reply goes to: 0 none, 1 the newest
 	// message, 2 the one before, and so on (Ctrl+R steps through them).
@@ -87,11 +102,14 @@ type roomCreatedMsg struct {
 }
 
 // roomOpMsg is the outcome of one room action. op is "invite", "accept",
-// "leave", "end" or "drop" (leave-or-end, nothing shown).
+// "leave", "end", "kick", "offer", "cancel" (withdraw an offer), "decline"
+// (refuse one), "take" (accept one) or "drop" (leave-or-end, nothing
+// shown). userID is who a kick or offer was about.
 type roomOpMsg struct {
 	op       string
 	id       string
 	username string
+	userID   string
 	err      error
 }
 
@@ -218,7 +236,7 @@ func (m Model) findRoom(name string) (*roomEntry, string) {
 
 // --- the :room command ---
 
-const roomUsage = "Usage: :room new <name> | invite <username> | accept [name] | leave [name] | end [name] confirm | members | list"
+const roomUsage = "Usage: :room new <name> | invite <username> | accept [name] | decline | leave [name] | kick <username> | transfer <username|cancel> | end [name] confirm | members | list"
 
 func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 	if m.identity == nil {
@@ -278,12 +296,87 @@ func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 		if e == nil {
 			return why, nil
 		}
+		if e.joined && e.offeredToMe {
+			return fmt.Sprintf("Taking over %s...", e.r.Name), m.roomOpCmd("take", e.r.ID, "")
+		}
 		if e.joined {
 			return fmt.Sprintf("You're already in %s.", e.r.Name), nil
 		}
-		return fmt.Sprintf("Joining %s...", e.r.Name), m.roomOpCmd("accept", e.r.ID, "")
+		// The room key will come from the owner, sealed to the owner's
+		// X25519 key, so that key is looked up and checked first - the
+		// server's word for it isn't enough.
+		owner := m.usernameForID(e.r.OwnerID)
+		if owner == "" {
+			return fmt.Sprintf("Can't tell who owns %s yet - refreshing your nodes; try :%s accept again in a moment.", e.r.Name, roomCommandName), m.fetchNodesCmd()
+		}
+		id := e.r.ID
+		return fmt.Sprintf("Checking %s's keys...", owner), func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
+			defer cancel()
+			keys, err := client.GetPublicKeys(ctx, token, owner)
+			return chatResolveResultMsg{username: owner, keys: keys, err: err, roomAccept: id}
+		}
 
-	case "leave", "decline":
+	case "decline":
+		e, why := m.findRoom(strings.Join(args[1:], " "))
+		if e == nil {
+			return why, nil
+		}
+		if e.offeredToMe {
+			return fmt.Sprintf("Declining the offer of %s...", e.r.Name), m.roomOpCmd("decline", e.r.ID, "")
+		}
+		if e.owner {
+			return fmt.Sprintf("You own this %s, so you can't just leave it: :%s end confirm ends it for everyone.", roomNoun, roomCommandName), nil
+		}
+		return fmt.Sprintf("Leaving %s...", e.r.Name), m.roomOpCmd("leave", e.r.ID, "")
+
+	case "kick", "remove":
+		if len(args) != 2 {
+			return fmt.Sprintf("Usage: :%s kick <username>", roomCommandName), nil
+		}
+		e, why := m.findRoom("")
+		if e == nil {
+			return why, nil
+		}
+		if !e.owner {
+			return fmt.Sprintf("Only the owner of a %s can remove people.", roomNoun), nil
+		}
+		id, username, ok := m.roomMemberNamed(e, args[1], true)
+		if !ok {
+			return fmt.Sprintf("%s isn't in this %s.", args[1], roomNoun), nil
+		}
+		if id == e.r.OwnerID {
+			return fmt.Sprintf("That's you. :%s end confirm ends the %s.", roomCommandName, roomNoun), nil
+		}
+		return fmt.Sprintf("Removing %s...", username), m.roomUserOpCmd("kick", e.r.ID, username, id)
+
+	case "transfer", "handover", "give":
+		if len(args) != 2 {
+			return fmt.Sprintf("Usage: :%s transfer <username> | :%s transfer cancel", roomCommandName, roomCommandName), nil
+		}
+		e, why := m.findRoom("")
+		if e == nil {
+			return why, nil
+		}
+		if !e.owner {
+			return fmt.Sprintf("Only the owner of a %s can hand it over.", roomNoun), nil
+		}
+		if strings.EqualFold(args[1], "cancel") {
+			if e.offeredTo == "" {
+				return "No ownership offer is open.", nil
+			}
+			return "Withdrawing the offer...", m.roomOpCmd("cancel", e.r.ID, "")
+		}
+		id, username, ok := m.roomMemberNamed(e, args[1], false)
+		if !ok {
+			return fmt.Sprintf("%s isn't in this %s yet - ownership can only go to someone who has joined.", args[1], roomNoun), nil
+		}
+		if id == e.r.OwnerID {
+			return fmt.Sprintf("You already own this %s.", roomNoun), nil
+		}
+		return fmt.Sprintf("Offering %s to %s...", e.r.Name, username), m.roomUserOpCmd("offer", e.r.ID, username, id)
+
+	case "leave":
 		e, why := m.findRoom(strings.Join(args[1:], " "))
 		if e == nil {
 			return why, nil
@@ -329,6 +422,24 @@ func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 		return m.roomSummary(), m.fetchRoomsCmd()
 	}
 	return roomUsage, nil
+}
+
+// roomMemberNamed finds someone in the room by username (any case). With
+// includeInvited it also finds people the owner invited who haven't joined.
+func (m Model) roomMemberNamed(e *roomEntry, name string, includeInvited bool) (id, username string, ok bool) {
+	for pid, p := range e.r.Roster {
+		if strings.EqualFold(p.Username, name) {
+			return pid, p.Username, true
+		}
+	}
+	if includeInvited {
+		for pid, p := range e.peers {
+			if strings.EqualFold(p.username, name) {
+				return pid, p.username, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // ownedRooms are the open rooms this client owns, name-sorted.
@@ -382,6 +493,10 @@ func (m Model) sortedRooms() []*roomEntry {
 }
 
 func (m Model) roomOpCmd(op, id, username string) tea.Cmd {
+	return m.roomUserOpCmd(op, id, username, "")
+}
+
+func (m Model) roomUserOpCmd(op, id, username, userID string) tea.Cmd {
 	client, token := m.apiClient, m.accessToken
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
@@ -396,6 +511,14 @@ func (m Model) roomOpCmd(op, id, username string) tea.Cmd {
 			err = client.LeaveRoom(ctx, token, id)
 		case "end":
 			err = client.EndRoom(ctx, token, id)
+		case "kick":
+			err = client.KickFromRoom(ctx, token, id, userID)
+		case "offer":
+			err = client.OfferRoomTransfer(ctx, token, id, userID)
+		case "cancel", "decline":
+			err = client.CancelRoomTransfer(ctx, token, id)
+		case "take":
+			err = client.AcceptRoomTransfer(ctx, token, id)
 		case "drop":
 			// Get out of a room without knowing whether it is ours: a
 			// member can leave; the owner is told to end it instead.
@@ -404,7 +527,7 @@ func (m Model) roomOpCmd(op, id, username string) tea.Cmd {
 				err = client.EndRoom(ctx, token, id)
 			}
 		}
-		return roomOpMsg{op: op, id: id, username: username, err: err}
+		return roomOpMsg{op: op, id: id, username: username, userID: userID, err: err}
 	}
 }
 
@@ -444,6 +567,7 @@ func (m Model) handleRoomCreated(msg roomCreatedMsg) (tea.Model, tea.Cmd) {
 		ID:       msg.room.OwnerID,
 		Username: m.username,
 		SignKey:  hex.EncodeToString(m.identity.SigningPublic),
+		Box:      hex.EncodeToString(m.identity.BoxPublic[:]),
 	})
 	e := &roomEntry{r: r, owner: true, joined: true, ready: true, peers: map[string]roomPeer{}}
 	m.putRoom(e)
@@ -470,9 +594,9 @@ func (m Model) handleRoomInviteResolved(msg chatResolveResultMsg) (tea.Model, te
 		return m, nil
 	}
 	// The same checks :chat makes: usable signed keys, and the pin. The
-	// room key will travel to this person over that pairwise channel, so
-	// it has to be one this device trusts.
-	contact, outcome, fail := m.acceptResolved(msg)
+	// room key will be sealed to this person's box key, so it has to be
+	// one this device trusts.
+	_, outcome, fail := m.acceptResolved(msg)
 	if fail != "" {
 		m.commandMsg = fail
 		return m, nil
@@ -493,10 +617,42 @@ func (m Model) handleRoomInviteResolved(msg chatResolveResultMsg) (tea.Model, te
 		userID:   msg.keys.UserID,
 		username: msg.username,
 		signKey:  msg.keys.PubKey,
-		contact:  contact,
+		box:      msg.keys.BoxPubKey,
 	}
 	m.commandMsg = fmt.Sprintf("Inviting %s...", msg.username)
 	return m, m.roomOpCmd("invite", e.r.ID, msg.username)
+}
+
+// handleRoomAcceptResolved is the second half of :room accept: the owner's
+// keys came back. They get the same checks as for :chat, and must belong to
+// the user the server says owns the room; only then is the invitation
+// accepted, with the owner's box key remembered for opening their key.
+func (m Model) handleRoomAcceptResolved(msg chatResolveResultMsg) (tea.Model, tea.Cmd) {
+	e := m.roomEntryFor(msg.roomAccept)
+	if e == nil || e.joined {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.commandMsg = fmt.Sprintf("Couldn't look up %s to join: %v", msg.username, msg.err)
+		return m, nil
+	}
+	_, outcome, fail := m.acceptResolved(msg)
+	if fail != "" {
+		m.commandMsg = fail
+		return m, nil
+	}
+	if outcome == pinChanged {
+		m.commandMsg = fmt.Sprintf("%s's key CHANGED since you pinned it - not joining. Compare fingerprints with :verify %s, or :accept %s to trust the new key.",
+			msg.username, msg.username, msg.username)
+		return m, nil
+	}
+	if msg.keys.UserID != e.r.OwnerID {
+		m.commandMsg = fmt.Sprintf("%s isn't who the server says owns this %s - not joining.", msg.username, roomNoun)
+		return m, nil
+	}
+	e.ownerBox, e.ownerSign = msg.keys.BoxPubKey, msg.keys.PubKey
+	m.commandMsg = fmt.Sprintf("Joining %s...", e.r.Name)
+	return m, m.roomOpCmd("accept", e.r.ID, "")
 }
 
 func (m Model) handleRoomOp(msg roomOpMsg) (tea.Model, tea.Cmd) {
@@ -548,6 +704,59 @@ func (m Model) handleRoomOp(msg roomOpMsg) (tea.Model, tea.Cmd) {
 		name := m.roomLabel(msg.id)
 		m.dropRoom(msg.id)
 		m.commandMsg = fmt.Sprintf("Left %s.", name)
+
+	case "kick":
+		if msg.err != nil {
+			m.commandMsg = fmt.Sprintf("Couldn't remove %s: %v", msg.username, msg.err)
+			return m, nil
+		}
+		if e != nil {
+			if e.removed == nil {
+				e.removed = map[string]bool{}
+			}
+			e.removed[msg.userID] = true
+		}
+		m.commandMsg = fmt.Sprintf("Removed %s.", msg.username)
+
+	case "offer":
+		if msg.err != nil {
+			m.commandMsg = fmt.Sprintf("Couldn't offer the %s to %s: %v", roomNoun, msg.username, msg.err)
+			return m, nil
+		}
+		if e != nil {
+			e.offeredTo = msg.userID
+			m.roomSay(msg.id, fmt.Sprintf("You offered %s to %s. You stay the owner until they :%s accept.", e.r.Name, msg.username, roomCommandName))
+		}
+		m.commandMsg = fmt.Sprintf("Offered to %s.", msg.username)
+
+	case "cancel":
+		if msg.err != nil && !api.IsNotFound(msg.err) {
+			m.commandMsg = fmt.Sprintf("Couldn't withdraw the offer: %v", msg.err)
+			return m, nil
+		}
+		if e != nil {
+			e.offeredTo = ""
+			m.roomSay(msg.id, "You withdrew the ownership offer.")
+		}
+		m.commandMsg = "Offer withdrawn."
+
+	case "decline":
+		if msg.err != nil && !api.IsNotFound(msg.err) {
+			m.commandMsg = fmt.Sprintf("Couldn't decline: %v", msg.err)
+			return m, nil
+		}
+		if e != nil {
+			e.offeredToMe = false
+			m.roomSay(msg.id, "You declined the ownership offer.")
+		}
+		m.commandMsg = "Declined."
+
+	case "take":
+		if msg.err != nil {
+			m.commandMsg = fmt.Sprintf("Couldn't take over: %v", msg.err)
+			return m, nil
+		}
+		// The server's room_owner_changed event does the rest.
 
 	case "end":
 		if msg.err != nil && !api.IsNotFound(msg.err) {
@@ -687,7 +896,7 @@ func (m *Model) handleRoomEvent(ev ws.Event) tea.Cmd {
 			// it can't address, and can't vouch for their signing key.
 			return nil
 		}
-		e.r.AddPeer(room.Peer{ID: p.userID, Username: p.username, SignKey: p.signKey})
+		e.r.AddPeer(room.Peer{ID: p.userID, Username: p.username, SignKey: p.signKey, Box: p.box})
 		m.roomSay(ev.Room, fmt.Sprintf("%s joined.", p.username))
 		return m.distributeRoomState(e)
 
@@ -713,11 +922,26 @@ func (m *Model) handleRoomEvent(ev ws.Event) tea.Cmd {
 			e.r.RemovePeer(ev.User)
 			delete(e.peers, ev.User)
 		}
-		if wasMember || e.owner {
-			m.roomSay(ev.Room, fmt.Sprintf("%s left.", name))
+		if e.offeredTo == ev.User {
+			e.offeredTo = ""
+		}
+		verb := "left"
+		if e.removed[ev.User] {
+			verb = "was removed"
+			delete(e.removed, ev.User)
 		}
 		if e.owner && wasMember {
+			// Whoever just went must not be able to read what comes next:
+			// new key, to everyone still here.
+			if err := e.r.Rekey(); err != nil {
+				m.commandMsg = fmt.Sprintf("Couldn't change the %s's key: %v", roomNoun, err)
+				return nil
+			}
+			m.roomSay(ev.Room, fmt.Sprintf("%s %s - the key was changed, so they can't read anything new.", name, verb))
 			return m.distributeRoomState(e)
+		}
+		if wasMember || e.owner {
+			m.roomSay(ev.Room, fmt.Sprintf("%s %s.", name, verb))
 		}
 
 	case ws.EventTypeRoomEnded:
@@ -727,11 +951,55 @@ func (m *Model) handleRoomEvent(ev ws.Event) tea.Cmd {
 		}
 		name := e.r.Name
 		m.dropRoom(ev.Room)
-		why := "the owner ended it"
-		if ev.Reason == "owner_gone" {
-			why = "the owner went offline"
+		switch ev.Reason {
+		case "kicked":
+			m.commandMsg = fmt.Sprintf("You were removed from %s. Everything in it is gone from here.", name)
+		case "invite_withdrawn":
+			m.commandMsg = fmt.Sprintf("Your invitation to %s was withdrawn when the %s changed hands.", name, roomNoun)
+		case "owner_gone":
+			m.commandMsg = fmt.Sprintf("%s ended: the owner went offline. Everything in it is gone.", name)
+		default:
+			m.commandMsg = fmt.Sprintf("%s ended: the owner ended it. Everything in it is gone.", name)
 		}
-		m.commandMsg = fmt.Sprintf("%s ended: %s. Everything in it is gone.", name, why)
+
+	case ws.EventTypeRoomDirect:
+		m.handleRoomDirect(ev)
+
+	case ws.EventTypeRoomTransferOffer:
+		e := m.roomEntryFor(ev.Room)
+		if e == nil || !e.joined || e.owner || ev.From != e.r.OwnerID {
+			return nil
+		}
+		e.offeredToMe = true
+		who := m.ownerLabel(ev.From)
+		if p, ok := e.r.Roster[ev.From]; ok {
+			who = sanitizeForTerminal(p.Username)
+		}
+		m.roomSay(ev.Room, fmt.Sprintf("%s wants to hand this %s to you. :%s accept makes you the owner; :%s decline refuses. Owning it means it ends if you quit.",
+			who, roomNoun, roomCommandName, roomCommandName))
+		m.noteUnread(roomThread(ev.Room), false)
+		m.commandMsg = fmt.Sprintf("%s offered you %s - see the Chat tab (3), then :%s accept or :%s decline", who, e.r.Name, roomCommandName, roomCommandName)
+
+	case ws.EventTypeRoomTransferCancelled:
+		e := m.roomEntryFor(ev.Room)
+		if e == nil {
+			return nil
+		}
+		switch {
+		case e.offeredToMe:
+			e.offeredToMe = false
+			m.roomSay(ev.Room, "The ownership offer was withdrawn.")
+		case e.offeredTo != "":
+			who := "They"
+			if p, ok := e.r.Roster[e.offeredTo]; ok {
+				who = p.Username
+			}
+			e.offeredTo = ""
+			m.roomSay(ev.Room, fmt.Sprintf("%s declined the ownership offer. You're still the owner.", who))
+		}
+
+	case ws.EventTypeRoomOwnerChanged:
+		return m.handleRoomOwnerChanged(ev)
 
 	case ws.EventTypeRoomMessage:
 		m.handleRoomMessage(ev)
@@ -794,10 +1062,38 @@ func (m Model) quoteFor(th chat.ContactKey, id string) string {
 	return truncateToWidth(who+": "+text, 60)
 }
 
-// --- key and roster distribution (owner) ---
+// --- key and roster distribution ---
+
+// sendDirect seals plain for one member of the room (static X25519 keys,
+// see room.SealDirect) and sends it as a direct room frame. The server only
+// delivers it between two joined members.
+func (m Model) sendDirect(roomID, toID, toBox string, plain []byte) tea.Cmd {
+	if m.wsClient == nil || m.identity == nil {
+		return nil
+	}
+	theirs, err := decodeHexBoxPublicKey(toBox)
+	if err != nil {
+		return nil
+	}
+	sealed, err := room.SealDirect(m.identity.BoxPrivate, theirs, roomID, plain)
+	if err != nil {
+		return nil
+	}
+	frame, err := ws.EncodeRoomDirect(roomID, toID, sealed)
+	if err != nil {
+		return nil
+	}
+	client := m.wsClient
+	return func() tea.Msg {
+		if err := client.Send(frame); err != nil {
+			return roomSendFailedMsg{id: roomID, err: err}
+		}
+		return nil
+	}
+}
 
 // distributeRoomState sends the current key and roster to every member
-// other than the owner, each over their own pairwise encrypted channel.
+// other than the owner, each sealed for that member alone.
 func (m *Model) distributeRoomState(e *roomEntry) tea.Cmd {
 	st, err := e.r.State()
 	if err != nil {
@@ -810,51 +1106,118 @@ func (m *Model) distributeRoomState(e *roomEntry) tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
-	for id := range e.r.Roster {
+	for id, p := range e.r.Roster {
 		if id == e.r.OwnerID {
 			continue
 		}
-		p, ok := e.peers[id]
-		if !ok {
-			continue
-		}
-		if c := m.sendMessage(p.contact, wire); c != nil {
+		if c := m.sendDirect(e.r.ID, id, p.Box, wire); c != nil {
 			cmds = append(cmds, c)
 		}
 	}
 	return tea.Batch(cmds...)
 }
 
-// receiveRoomControl handles a room control message that arrived over a
-// pairwise channel from contact. Only the room's owner may change a
-// room's state; room.ApplyState enforces that against the sender's user id.
-func (m *Model) receiveRoomControl(contact chat.ContactKey, plaintext []byte) tea.Cmd {
-	st, err := room.DecodeState(plaintext)
-	if err != nil {
-		m.commandMsg = fmt.Sprintf("Ignored a malformed %s message from %s.", roomNoun, m.chatContactLabel(contact))
-		return nil
+// directBoxOf is the box key to use for a direct payload from `from`: the
+// roster's, or - before the first state - the owner's as looked up when the
+// invitation was accepted. Anyone else has none and can't be opened.
+func (m Model) directBoxOf(e *roomEntry, from string) (*[32]byte, bool) {
+	hexKey := ""
+	if p, ok := e.r.Roster[from]; ok {
+		hexKey = p.Box
+	} else if from == e.r.OwnerID {
+		hexKey = e.ownerBox
 	}
-	e := m.roomEntryFor(st.Room)
-	if e == nil || e.owner {
-		// A room we don't know about (or one we own): not ours to join
-		// or change because someone sent us bytes.
-		return nil
+	if hexKey == "" {
+		return nil, false
 	}
-	from, ok := m.recipientUserID(contact)
+	k, err := decodeHexBoxPublicKey(hexKey)
+	return k, err == nil
+}
+
+// handleRoomDirect handles a payload another member sealed for us. Only the
+// room's current owner may change its state; room.ApplyState enforces that
+// against the sender's user id, and the seal proves the sender holds that
+// user's box key.
+func (m *Model) handleRoomDirect(ev ws.Event) {
+	e := m.roomEntryFor(ev.Room)
+	if e == nil || !e.joined || e.owner || m.identity == nil {
+		return
+	}
+	theirs, ok := m.directBoxOf(e, ev.From)
 	if !ok {
-		return nil
+		return
 	}
-	released, err := e.r.ApplyState(from, st)
+	plain, err := room.OpenDirect(m.identity.BoxPrivate, theirs, ev.Room, ev.Payload)
+	if err != nil || !room.IsControl(plain) {
+		return
+	}
+	st, err := room.DecodeState(plain)
+	if err != nil || st.Room != e.r.ID {
+		m.commandMsg = fmt.Sprintf("Ignored a malformed %s message.", roomNoun)
+		return
+	}
+	if !e.ready && e.ownerBox != "" {
+		// The first state must describe the owner by the keys we checked.
+		for _, p := range st.Roster {
+			if p.ID == st.Owner && (!strings.EqualFold(p.Box, e.ownerBox) || !strings.EqualFold(p.SignKey, e.ownerSign)) {
+				m.commandMsg = fmt.Sprintf("Ignored a %s key that named the owner with different keys than you verified.", roomNoun)
+				return
+			}
+		}
+	}
+	released, err := e.r.ApplyState(ev.From, st)
 	if err != nil {
-		m.commandMsg = fmt.Sprintf("Ignored a %s update from %s: %v", roomNoun, m.chatContactLabel(contact), err)
-		return nil
+		m.commandMsg = fmt.Sprintf("Ignored a %s update: %v", roomNoun, err)
+		return
 	}
 	if !e.ready {
 		e.ready = true
+		e.ownerBox, e.ownerSign = "", ""
 		m.roomSay(e.r.ID, fmt.Sprintf("Connected: the owner's key arrived. %d in the %s; messages are end-to-end encrypted.", len(e.r.Roster), roomNoun))
 	}
 	for _, got := range released {
 		m.showRoomMessage(e, got)
+	}
+}
+
+// handleRoomOwnerChanged adopts the server's announcement that the room has
+// a new owner - but only if the new owner is someone already on this
+// client's roster; a bare announcement can't install a stranger.
+func (m *Model) handleRoomOwnerChanged(ev ws.Event) tea.Cmd {
+	e := m.roomEntryFor(ev.Room)
+	if e == nil || !e.joined {
+		return nil
+	}
+	if !e.r.Ready() {
+		// Our key never arrived and we have no verified way to learn the new
+		// owner's keys. Step out; the new owner can invite us again.
+		m.commandMsg = fmt.Sprintf("%s changed hands before your key arrived, so you can't be keyed in. Leaving - ask to be invited again.", e.r.Name)
+		return m.roomOpCmd("leave", ev.Room, "")
+	}
+	// Who we are has to be read before the owner changes: for an owner it is
+	// the room's owner id.
+	self := m.roomSelf(e)
+	previous := e.r.OwnerID
+	if err := e.r.SetOwner(ev.Owner); err != nil {
+		m.commandMsg = fmt.Sprintf("Ignored an ownership change in %s: the new owner isn't someone you know here.", e.r.Name)
+		return nil
+	}
+	e.offeredTo, e.offeredToMe = "", false
+	e.peers = map[string]roomPeer{}
+	newName := "someone"
+	if p, ok := e.r.Roster[ev.Owner]; ok {
+		newName = sanitizeForTerminal(p.Username)
+	}
+	switch {
+	case ev.Owner == self:
+		e.owner = true
+		m.roomSay(ev.Room, fmt.Sprintf("You now own this %s. It ends if you quit or go offline, unless you hand it on.", roomNoun))
+		m.commandMsg = fmt.Sprintf("You own %s now.", e.r.Name)
+	case previous == self || e.owner:
+		e.owner = false
+		m.roomSay(ev.Room, fmt.Sprintf("%s now owns this %s. It no longer ends when you quit.", newName, roomNoun))
+	default:
+		m.roomSay(ev.Room, fmt.Sprintf("%s now owns this %s.", newName, roomNoun))
 	}
 	return nil
 }
@@ -917,6 +1280,11 @@ func (m Model) sendRoomText(id, body string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleRoomSendFailed(msg roomSendFailedMsg) (tea.Model, tea.Cmd) {
+	if msg.mid == "" {
+		// A key handed to a member, not a message.
+		m.commandMsg = fmt.Sprintf("Couldn't reach synq-server to deliver the %s's key: %v", roomNoun, msg.err)
+		return m, nil
+	}
 	if m.roomEntryFor(msg.id) != nil {
 		m.roomSay(msg.id, "⚠ A message you just sent didn't reach synq-server.")
 	}
@@ -995,6 +1363,12 @@ func (m Model) roomStatusLines(id string, w int) []string {
 			text += fmt.Sprintf(" · %d invited", p)
 		}
 		text += " · you own this " + roomNoun
+		if p, ok := e.r.Roster[e.offeredTo]; ok && e.offeredTo != "" {
+			text += " · offered to " + sanitizeForTerminal(p.Username)
+		}
+	}
+	if e.offeredToMe {
+		text += fmt.Sprintf(" · the owner offered it to you: :%s accept / :%s decline", roomCommandName, roomCommandName)
 	}
 	return []string{lipgloss.NewStyle().
 		Foreground(t.Success).
@@ -1035,8 +1409,8 @@ func (m Model) quitPromptText() string {
 	for _, e := range m.ownedRooms() {
 		names = append(names, e.r.Name)
 	}
-	return fmt.Sprintf("You own %s: %s. Quitting ends it for everyone and wipes everything said in it. Quit anyway? y = quit and end · n or esc = stay",
-		pluralRooms(len(names)), strings.Join(names, ", "))
+	return fmt.Sprintf("You own %s: %s. Quitting ends it for everyone and wipes everything said in it - :%s transfer <username> hands it on first. Quit anyway? y = quit and end · n or esc = stay",
+		pluralRooms(len(names)), strings.Join(names, ", "), roomCommandName)
 }
 
 func pluralRooms(n int) string {

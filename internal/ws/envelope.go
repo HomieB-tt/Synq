@@ -24,6 +24,10 @@ import (
 //	  { "type": "room_joined",  "room", "user" }
 //	  { "type": "room_left",    "room", "user" }
 //	  { "type": "room_ended",   "room", "reason" }
+//	  { "type": "room_direct",  "room", "from", "payload" }
+//	  { "type": "room_transfer_offer",     "room", "from" }
+//	  { "type": "room_transfer_cancelled", "room" }
+//	  { "type": "room_owner_changed",      "room", "owner", "from" }
 //
 // The server relays "payload" opaquely - it never parses, stores, or
 // inspects it, which is what lets the client pick its own encoding
@@ -46,6 +50,13 @@ const (
 	EventTypeRoomJoined  = "room_joined"
 	EventTypeRoomLeft    = "room_left"
 	EventTypeRoomEnded   = "room_ended"
+
+	// A payload sealed for one member (room key and roster), and the
+	// events around handing a room to someone else.
+	EventTypeRoomDirect            = "room_direct"
+	EventTypeRoomTransferOffer     = "room_transfer_offer"
+	EventTypeRoomTransferCancelled = "room_transfer_cancelled"
+	EventTypeRoomOwnerChanged      = "room_owner_changed"
 )
 
 // ErrorRateLimited is the only value EventTypeError carries today
@@ -66,8 +77,10 @@ type Event struct {
 
 	// Room events only. Room is the room id; User is who joined or left;
 	// Name is the room's name (invitations); Seq and Cid belong to room
-	// messages and acks; Reason says why a room ended.
+	// messages and acks; Reason says why a room ended; Owner is the new
+	// owner in a room_owner_changed (From is the previous one).
 	Room   string
+	Owner  string
 	User   string
 	Name   string
 	Seq    int64
@@ -101,6 +114,7 @@ type inboundFrame struct {
 	Payload json.RawMessage `json:"payload"`
 
 	Room   string `json:"room"`
+	Owner  string `json:"owner"`
 	User   string `json:"user"`
 	Name   string `json:"name"`
 	Seq    int64  `json:"seq"`
@@ -197,6 +211,34 @@ func DecodeFrame(data []byte) (Event, error) {
 		}
 		return Event{Type: f.Type, Room: f.Room, Reason: f.Reason}, nil
 
+	case EventTypeRoomDirect:
+		if f.Room == "" || f.From == "" {
+			return Event{}, errors.New("ws: room_direct frame is missing room or from")
+		}
+		payload, err := decodePayload(f.Payload)
+		if err != nil {
+			return Event{}, err
+		}
+		return Event{Type: f.Type, Room: f.Room, From: f.From, Payload: payload}, nil
+
+	case EventTypeRoomTransferOffer:
+		if f.Room == "" || f.From == "" {
+			return Event{}, errors.New("ws: room_transfer_offer frame is missing room or from")
+		}
+		return Event{Type: f.Type, Room: f.Room, From: f.From}, nil
+
+	case EventTypeRoomTransferCancelled:
+		if f.Room == "" {
+			return Event{}, errors.New("ws: room_transfer_cancelled frame has no room")
+		}
+		return Event{Type: f.Type, Room: f.Room}, nil
+
+	case EventTypeRoomOwnerChanged:
+		if f.Room == "" || f.Owner == "" {
+			return Event{}, errors.New("ws: room_owner_changed frame is missing room or owner")
+		}
+		return Event{Type: f.Type, Room: f.Room, Owner: f.Owner, From: f.From}, nil
+
 	case EventTypeError:
 		if f.Error == "" {
 			return Event{}, errors.New("ws: error frame has no error")
@@ -244,4 +286,18 @@ func EncodeRoomSend(roomID, cid string, sealed []byte) ([]byte, error) {
 		Cid:     cid,
 		Payload: base64.StdEncoding.EncodeToString(sealed),
 	})
+}
+
+// EncodeRoomDirect builds a direct room frame: sealed goes to one member
+// of the room, and only if both ends are joined members. The server
+// delivers it as a room_direct event.
+func EncodeRoomDirect(roomID, toUserID string, sealed []byte) ([]byte, error) {
+	if roomID == "" || toUserID == "" {
+		return nil, errors.New("ws: EncodeRoomDirect: empty room or recipient")
+	}
+	return json.Marshal(struct {
+		To      string `json:"to"`
+		Room    string `json:"room"`
+		Payload string `json:"payload"`
+	}{toUserID, roomID, base64.StdEncoding.EncodeToString(sealed)})
 }

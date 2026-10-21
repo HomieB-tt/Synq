@@ -8,7 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/HomieB-tt/synq/internal/chat"
-	"github.com/HomieB-tt/synq/internal/room"
 	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ws"
 )
@@ -283,13 +282,6 @@ func (m *Model) handleSealed(contact chat.ContactKey, body []byte) tea.Cmd {
 	if !m.epochFor(s).Recv.Accept(counter) {
 		m.commandMsg = fmt.Sprintf("Ignored a repeated message from %s.", m.chatContactLabel(contact))
 		return nil
-	}
-
-	if room.IsControl(plaintext) {
-		// The owner of a room handing us its key and roster. It rode the
-		// same authenticated channel as text, so it is known to be from
-		// this contact; receiveRoomControl checks they own the room.
-		return m.receiveRoomControl(contact, plaintext)
 	}
 
 	if transfer.IsOffer(plaintext) {

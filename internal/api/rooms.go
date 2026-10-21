@@ -6,6 +6,8 @@ import (
 	"net/url"
 )
 
+func roomPath(roomID, tail string) string { return "/rooms/" + url.PathEscape(roomID) + tail }
+
 // RoomMember is one person in a room as the server lists them. Status is
 // "JOINED" or "INVITED".
 type RoomMember struct {
@@ -32,6 +34,9 @@ type Room struct {
 	Status     string       `json:"status"`
 	Members    []RoomMember `json:"members"`
 	MaxMembers int          `json:"max_members"`
+	// PendingOwnerID is set while an ownership offer is waiting for an
+	// answer.
+	PendingOwnerID string `json:"pending_owner_id"`
 }
 
 // CreateRoom makes a room with the caller as its owner.
@@ -82,4 +87,28 @@ func (c *Client) LeaveRoom(ctx context.Context, accessToken, roomID string) erro
 // EndRoom ends a room for everyone. Only the owner can.
 func (c *Client) EndRoom(ctx context.Context, accessToken, roomID string) error {
 	return c.do(ctx, http.MethodDelete, "/rooms/"+url.PathEscape(roomID), accessToken, nil, nil)
+}
+
+// KickFromRoom removes a member, or withdraws an invitation. Only the
+// owner can.
+func (c *Client) KickFromRoom(ctx context.Context, accessToken, roomID, userID string) error {
+	return c.do(ctx, http.MethodPost, roomPath(roomID, "/kick"), accessToken,
+		map[string]string{"user_id": userID}, nil)
+}
+
+// OfferRoomTransfer offers ownership to a joined member. Only the owner can.
+func (c *Client) OfferRoomTransfer(ctx context.Context, accessToken, roomID, userID string) error {
+	return c.do(ctx, http.MethodPost, roomPath(roomID, "/transfer"), accessToken,
+		map[string]string{"user_id": userID}, nil)
+}
+
+// CancelRoomTransfer withdraws an ownership offer (owner) or declines one
+// (the member it was offered to).
+func (c *Client) CancelRoomTransfer(ctx context.Context, accessToken, roomID string) error {
+	return c.do(ctx, http.MethodDelete, roomPath(roomID, "/transfer"), accessToken, nil, nil)
+}
+
+// AcceptRoomTransfer takes the room that was offered to the caller.
+func (c *Client) AcceptRoomTransfer(ctx context.Context, accessToken, roomID string) error {
+	return c.do(ctx, http.MethodPost, roomPath(roomID, "/transfer/accept"), accessToken, nil, nil)
 }

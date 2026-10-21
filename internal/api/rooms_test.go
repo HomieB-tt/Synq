@@ -63,6 +63,10 @@ func TestRoomCallsUseTheDocumentedRoutes(t *testing.T) {
 		{"accept", func() error { return c.AcceptRoomInvite(ctx, "tok", "r1") }, "POST", "/rooms/r1/accept", ""},
 		{"leave", func() error { return c.LeaveRoom(ctx, "tok", "r1") }, "POST", "/rooms/r1/leave", ""},
 		{"end", func() error { return c.EndRoom(ctx, "tok", "r1") }, "DELETE", "/rooms/r1", ""},
+		{"kick", func() error { return c.KickFromRoom(ctx, "tok", "r1", "u7") }, "POST", "/rooms/r1/kick", "user_id"},
+		{"offer", func() error { return c.OfferRoomTransfer(ctx, "tok", "r1", "u7") }, "POST", "/rooms/r1/transfer", "user_id"},
+		{"cancel", func() error { return c.CancelRoomTransfer(ctx, "tok", "r1") }, "DELETE", "/rooms/r1/transfer", ""},
+		{"take", func() error { return c.AcceptRoomTransfer(ctx, "tok", "r1") }, "POST", "/rooms/r1/transfer/accept", ""},
 	}
 	for _, s := range steps {
 		if err := s.call(); err != nil {

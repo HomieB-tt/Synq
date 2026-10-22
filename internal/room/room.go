@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"unicode"
 	"unicode/utf8"
@@ -99,14 +100,54 @@ func CleanName(raw string) (string, bool) {
 
 // --- messages ---
 
-// Message is one room message as the author wrote it.
+// FileRef is what a message says about a file it shares: where to fetch
+// the ciphertext from the server, what it is, and the key that opens it.
+// It rides inside the signed, sealed message, so the server never sees the
+// name or key, only members holding the room key can read them, and the
+// signature binds the hash a download is checked against to the author.
+type FileRef struct {
+	ID   string `json:"id"`   // the server's room file id
+	Name string `json:"name"` // the author's filename (untrusted)
+	Size int64  `json:"size"` // plaintext bytes
+	SHA  string `json:"sha"`  // "sha256:<hex>" of the ciphertext
+	Key  []byte `json:"key"`  // the file key
+}
+
+// MaxFileBytes is the largest plaintext a room file can have (100 MB of
+// ciphertext on the server, less per-chunk overhead).
+const MaxFileBytes = 100*1024*1024 - 1600
+
+var (
+	fileIDRe  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	fileSHARe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+)
+
+func (f *FileRef) validate() error {
+	switch {
+	case !fileIDRe.MatchString(f.ID):
+		return errors.New("room: bad file id")
+	case f.Size < 0 || f.Size > MaxFileBytes:
+		return errors.New("room: file size out of range")
+	case !fileSHARe.MatchString(f.SHA):
+		return errors.New("room: bad file hash")
+	case len(f.Key) != 32:
+		return errors.New("room: bad file key")
+	case f.Name == "" || len(f.Name) > 255 || !utf8.ValidString(f.Name):
+		return errors.New("room: bad file name")
+	}
+	return nil
+}
+
+// Message is one room message as the author wrote it. A message with a
+// File shares that file; its Body is then just a caption.
 type Message struct {
-	V    int    `json:"v"`
-	ID   string `json:"id"`
-	Re   string `json:"re,omitempty"` // id of the message this replies to
-	Body string `json:"body"`
-	TS   int64  `json:"ts"`
-	Sig  []byte `json:"sig"`
+	V    int      `json:"v"`
+	ID   string   `json:"id"`
+	Re   string   `json:"re,omitempty"` // id of the message this replies to
+	Body string   `json:"body"`
+	File *FileRef `json:"file,omitempty"`
+	TS   int64    `json:"ts"`
+	Sig  []byte   `json:"sig"`
 }
 
 const messageVersion = 1
@@ -123,6 +164,20 @@ func (m *Message) signingBytes(roomID string) []byte {
 	fmt.Fprintf(&b, "%d", m.TS)
 	b.WriteByte(0)
 	b.WriteString(m.Body)
+	if m.File != nil {
+		// Everything about the file is covered, so a relay or another
+		// member can't swap in a different file, hash or key.
+		b.WriteString("\x00file\x00")
+		b.WriteString(m.File.ID)
+		b.WriteByte(0)
+		b.WriteString(m.File.Name)
+		b.WriteByte(0)
+		fmt.Fprintf(&b, "%d", m.File.Size)
+		b.WriteByte(0)
+		b.WriteString(m.File.SHA)
+		b.WriteByte(0)
+		b.Write(m.File.Key)
+	}
 	return b.Bytes()
 }
 
@@ -154,6 +209,9 @@ func (m *Message) validate() error {
 		return errors.New("room: message body empty or too long")
 	case !utf8.ValidString(m.Body):
 		return errors.New("room: message body is not valid UTF-8")
+	}
+	if m.File != nil {
+		return m.File.validate()
 	}
 	return nil
 }

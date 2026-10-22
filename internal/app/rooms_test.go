@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/crypto"
 	"github.com/HomieB-tt/synq/internal/room"
+	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ui/styles"
 	"github.com/HomieB-tt/synq/internal/ws"
 )
@@ -646,10 +649,10 @@ func TestFindRoomMatchesNamesAndComplainsWhenAmbiguous(t *testing.T) {
 	if e, why := m.findRoom("st"); e != nil || !strings.Contains(why, "More than one") {
 		t.Errorf("ambiguous prefix: %v %q", e, why)
 	}
-	if e, why := m.findRoom("nope"); e != nil || !strings.Contains(why, "No room") {
+	if e, why := m.findRoom("nope"); e != nil || !strings.Contains(why, "No "+roomNoun) {
 		t.Errorf("unknown name: %v %q", e, why)
 	}
-	if e, why := m.findRoom(""); e != nil || !strings.Contains(why, "Open a room") {
+	if e, why := m.findRoom(""); e != nil || !strings.Contains(why, "Open a "+roomNoun) {
 		t.Errorf("no name and no open room: %v %q", e, why)
 	}
 	m.chatActive = roomThread("2")
@@ -658,13 +661,24 @@ func TestFindRoomMatchesNamesAndComplainsWhenAmbiguous(t *testing.T) {
 	}
 }
 
-func TestFilesAreRefusedInARoom(t *testing.T) {
+func TestSendingAFileInARoomChecksTheRoomFirst(t *testing.T) {
 	m := loggedIn(t, ownerModel(t))
 	m.activeTab = tabChat
-	m.fileSession = "sess"
-	res, cmd := m.sendFileCmd("/tmp/x")
-	if cmd != nil || !strings.Contains(res, "room") {
-		t.Fatalf("res=%q cmd=%v", res, cmd != nil)
+	m.chatActive = roomThread(testRoomID)
+	// Not connected: refused, nothing started.
+	if res, cmd := m.sendFileCmd("/tmp/x"); cmd != nil || !strings.Contains(res, "Not connected") {
+		t.Fatalf("offline: res=%q cmd=%v", res, cmd != nil)
+	}
+	m = withClient(t, m)
+	if res, cmd := m.sendFileCmd(""); cmd != nil || !strings.Contains(res, "Usage") {
+		t.Fatalf("no path: res=%q", res)
+	}
+	// A member who hasn't received the key yet can't share.
+	bob := withClient(t, loggedIn(t, memberModel(t, "bob")))
+	bob.activeTab = tabChat
+	bob.chatActive = roomThread(testRoomID)
+	if res, cmd := bob.sendFileCmd("/tmp/x"); cmd != nil || !strings.Contains(res, "key") {
+		t.Fatalf("keyless: res=%q", res)
 	}
 }
 
@@ -1091,5 +1105,170 @@ func TestTheOwnersKeysMustBelongToTheUserWhoOwnsTheRoom(t *testing.T) {
 	e := m.roomEntryFor(testRoomID)
 	if cmd == nil || e.ownerBox != box || e.ownerSign != sg.hex() {
 		t.Fatalf("right owner refused: %q box=%q", m.commandMsg, e.ownerBox)
+	}
+}
+
+// --- room files ---
+
+const testFileID = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"
+
+// fileEventFrom is a room message from m that shares a file.
+func fileEventFrom(t *testing.T, m Model, from string, f *room.FileRef) ws.Event {
+	t.Helper()
+	e := m.roomEntryFor(testRoomID)
+	sealed, err := room.Seal(e.r.Key, testRoomID, e.r.Gen, m.identity.SigningPrivate, room.Message{
+		ID: room.NewMessageID(), Body: "📎 " + f.Name, File: f, TS: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws.Event{Type: ws.EventTypeRoomMessage, Room: testRoomID, From: from, Seq: 1, Payload: sealed}
+}
+
+func testFileRef(name string) *room.FileRef {
+	return &room.FileRef{
+		ID: testFileID, Name: name, Size: 2048,
+		SHA: "sha256:" + strings.Repeat("ab", 32),
+		Key: []byte(strings.Repeat("k", 32)),
+	}
+}
+
+func TestAFileSharedInARoomIsListedForEveryMemberAndFetchedOnDemand(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	ev := fileEventFrom(t, owner, testOwnerID, testFileRef("plan.pdf"))
+	alice.handleRoomEvent(ev)
+
+	if len(alice.files) != 1 {
+		t.Fatalf("files = %d", len(alice.files))
+	}
+	f := alice.files[0]
+	if f.roomID != testRoomID || f.offer.Name != "plan.pdf" || f.offer.AttachmentID != testFileID || f.key == nil || f.state != fileOffered {
+		t.Fatalf("entry = %+v", f)
+	}
+	if !strings.Contains(f.from, "olive") || !strings.Contains(f.from, "standup") {
+		t.Fatalf("from = %q", f.from)
+	}
+	body := lastBody(alice, roomThread(testRoomID))
+	if !strings.Contains(body, "plan.pdf") || !strings.Contains(body, ":files") {
+		t.Fatalf("thread says %q", body)
+	}
+	// Nothing was downloaded just by hearing about it.
+	if alice.fileCache != nil {
+		t.Fatal("a download started on its own")
+	}
+}
+
+func TestTheSameSharedFileIsListedOnce(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	alice.handleRoomEvent(fileEventFrom(t, owner, testOwnerID, testFileRef("plan.pdf")))
+	alice.handleRoomEvent(fileEventFrom(t, owner, testOwnerID, testFileRef("plan.pdf"))) // a new message, same file
+	if len(alice.files) != 1 {
+		t.Fatalf("files = %d", len(alice.files))
+	}
+}
+
+func TestAHostileFileNameIsMadeSafe(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	alice.handleRoomEvent(fileEventFrom(t, owner, testOwnerID, testFileRef("../../.ssh/authorized_keys")))
+	if len(alice.files) != 1 {
+		t.Fatalf("files = %d", len(alice.files))
+	}
+	if n := alice.files[0].offer.Name; strings.ContainsAny(n, `/\`) || strings.HasPrefix(n, ".") {
+		t.Fatalf("name = %q", n)
+	}
+}
+
+func TestAFileFromAForgedSenderIsNotListed(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	ev := fileEventFrom(t, owner, "alice-id", testFileRef("plan.pdf")) // the server claims alice sent it
+	alice.handleRoomEvent(ev)
+	if len(alice.files) != 0 {
+		t.Fatal("a file with a signature that isn't the named sender's was listed")
+	}
+}
+
+func TestFilesAreForgottenAndWipedWhenTheRoomEnds(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	cache, err := transfer.NewCache(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.fileCache = cache
+	alice.handleRoomEvent(fileEventFrom(t, owner, testOwnerID, testFileRef("plan.pdf")))
+	dir, err := cache.Dir(testFileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.pdf"), []byte("decrypted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alice.files[0].state, alice.files[0].path = fileReady, filepath.Join(dir, "plan.pdf")
+	// A 1:1 file must survive another room's ending.
+	alice.files = append(alice.files, &fileEntry{contact: "someone", offer: &transfer.Offer{AttachmentID: "11111111-4e5f-6071-8293-a4b5c6d7e8f9"}})
+
+	alice.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomEnded, Room: testRoomID, Reason: "owner_ended"})
+
+	if len(alice.files) != 1 || alice.files[0].roomID != "" {
+		t.Fatalf("files after the room ended: %+v", alice.files)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("the decrypted copy survived the room")
+	}
+}
+
+func TestBeingRemovedAlsoWipesTheRoomsFiles(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	alice.handleRoomEvent(fileEventFrom(t, owner, testOwnerID, testFileRef("plan.pdf")))
+	alice.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomEnded, Room: testRoomID, Reason: "kicked"})
+	if len(alice.files) != 0 {
+		t.Fatal("a removed member kept the room's files listed")
+	}
+}
+
+func TestSharingAFileAnnouncesItInASignedMessage(t *testing.T) {
+	owner, alice, _ := twoMembers(t)
+	owner = withClient(t, owner)
+	sent := &transfer.Sent{AttachmentID: testFileID, Name: "plan.pdf", Size: 2048, Hash: "sha256:" + strings.Repeat("cd", 32)}
+	sent.Key = new([32]byte)
+	sent.Key[0] = 9
+	next, cmd := owner.handleRoomFileSent(roomFileSentMsg{room: testRoomID, sent: sent})
+	owner = next.(Model)
+	if cmd == nil {
+		t.Fatal("the announcement was not sent")
+	}
+	last := owner.chatStore.Slice(roomThread(testRoomID), owner.chatStore.Len(roomThread(testRoomID))-1, owner.chatStore.Len(roomThread(testRoomID)))[0]
+	if !last.Outgoing || !strings.Contains(string(last.Body), "plan.pdf") || last.ID == "" {
+		t.Fatalf("own line = %+v", last)
+	}
+	// What other members would receive: the same message, with the file.
+	e := owner.roomEntryFor(testRoomID)
+	sealed, err := room.Seal(e.r.Key, testRoomID, e.r.Gen, owner.identity.SigningPrivate, room.Message{
+		ID: room.NewMessageID(), Body: "x", TS: 1,
+		File: &room.FileRef{ID: sent.AttachmentID, Name: sent.Name, Size: sent.Size, SHA: sent.Hash, Key: sent.Key[:]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.handleRoomEvent(ws.Event{Type: ws.EventTypeRoomMessage, Room: testRoomID, From: testOwnerID, Seq: 1, Payload: sealed})
+	if len(alice.files) != 1 || alice.files[0].key[0] != 9 {
+		t.Fatal("the file key didn't reach the member")
+	}
+}
+
+func TestSharingFailuresSayWhyAndAnnounceNothing(t *testing.T) {
+	owner := withClient(t, ownerModel(t))
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&api.APIError{StatusCode: 409, Message: "full"}, "full of files"},
+		{&api.APIError{StatusCode: 404, Message: "no such room"}, "no longer in it"},
+		{&api.APIError{StatusCode: 500, Message: "boom"}, "Couldn't share"},
+	} {
+		next, cmd := owner.handleRoomFileSent(roomFileSentMsg{room: testRoomID, err: c.err})
+		got := next.(Model)
+		if cmd != nil || !strings.Contains(got.commandMsg, c.want) {
+			t.Errorf("%v: cmd=%v msg=%q", c.err, cmd != nil, got.commandMsg)
+		}
 	}
 }

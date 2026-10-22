@@ -747,6 +747,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case roomSendFailedMsg:
 		return m.handleRoomSendFailed(msg)
 
+	case roomFileSentMsg:
+		return m.handleRoomFileSent(msg)
+
 	case feedLoadedMsg:
 		return m.handleFeedLoaded(msg)
 
@@ -1660,7 +1663,7 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		}
 		return fmt.Sprintf("Startup checklist %s - effective from the next launch.", value), false, nil
 
-	case "room":
+	case "blink":
 		result, roomCmd := m.roomCommand(fields[1:])
 		return result, false, roomCmd
 

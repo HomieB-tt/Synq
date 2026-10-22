@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 func roomPath(roomID, tail string) string { return "/rooms/" + url.PathEscape(roomID) + tail }
@@ -111,4 +115,56 @@ func (c *Client) CancelRoomTransfer(ctx context.Context, accessToken, roomID str
 // AcceptRoomTransfer takes the room that was offered to the caller.
 func (c *Client) AcceptRoomTransfer(ctx context.Context, accessToken, roomID string) error {
 	return c.do(ctx, http.MethodPost, roomPath(roomID, "/transfer/accept"), accessToken, nil, nil)
+}
+
+// UploadRoomFile puts size bytes of ciphertext from body into a room as a
+// room-owned file and returns its id. sha256 is "sha256:<hex>" of the
+// ciphertext. The body is streamed, never read into memory. 409 means the
+// room is full of files (20, or 300 MB).
+func (c *Client) UploadRoomFile(ctx context.Context, accessToken, roomID string, body io.Reader, size int64, sha256 string) (string, error) {
+	q := url.Values{"size": {strconv.FormatInt(size, 10)}, "sha256": {sha256}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+roomPath(roomID, "/files")+"?"+q.Encode(), io.NopCloser(body))
+	if err != nil {
+		return "", fmt.Errorf("api: build upload request: %w", err)
+	}
+	req.ContentLength = size
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("api: upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if err := statusError(resp); err != nil {
+		return "", err
+	}
+	var out struct {
+		FileID string `json:"file_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err != nil || out.FileID == "" {
+		return "", fmt.Errorf("api: upload reply had no file id")
+	}
+	return out.FileID, nil
+}
+
+// DownloadRoomFile opens a room file's ciphertext stream. The caller must
+// Close it, and check it read exactly the expected size.
+func (c *Client) DownloadRoomFile(ctx context.Context, accessToken, roomID, fileID string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.BaseURL+roomPath(roomID, "/files/"+url.PathEscape(fileID)), nil)
+	if err != nil {
+		return nil, fmt.Errorf("api: build download request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("api: download: %w", err)
+	}
+	if err := statusError(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	return resp.Body, nil
 }

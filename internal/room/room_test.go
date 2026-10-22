@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -507,4 +508,83 @@ func TestANewOwnerCanRekeyAndServeTheRoomItAlreadyHolds(t *testing.T) {
 		t.Fatal("the former owner's state was accepted")
 	}
 	_ = bob
+}
+
+// --- files ---
+
+func fileRef() *FileRef {
+	return &FileRef{
+		ID:   "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+		Name: "plan.pdf",
+		Size: 1234,
+		SHA:  "sha256:" + strings.Repeat("ab", 32),
+		Key:  bytes.Repeat([]byte{7}, 32),
+	}
+}
+
+func sealFile(t *testing.T, r *Room, from member, f *FileRef) []byte {
+	t.Helper()
+	s, err := Seal(r.Key, r.ID, r.Gen, from.priv, Message{ID: NewMessageID(), Body: "📎 plan.pdf", File: f, TS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestAFileMessageRoundTripsAndKeepsItsFileDetails(t *testing.T) {
+	owner, _, _, ro, ra, _ := setup(t)
+	got, res := ra.Receive(owner.id, 1, sealFile(t, ro, owner, fileRef()))
+	if res != Accepted || got.Msg.File == nil {
+		t.Fatalf("res=%v file=%v", res, got.Msg.File)
+	}
+	if !reflect.DeepEqual(got.Msg.File, fileRef()) {
+		t.Fatal("file details changed in transit")
+	}
+}
+
+func TestTheSignatureCoversTheFile(t *testing.T) {
+	owner, _, _, ro, _, _ := setup(t)
+	m := Message{ID: NewMessageID(), Body: "📎", File: fileRef(), TS: 1}
+	m.Sign(owner.priv, ro.ID)
+	pub, _ := hex.DecodeString(owner.peer.SignKey)
+	if !m.Verify(pub, ro.ID) {
+		t.Fatal("a good file message didn't verify")
+	}
+	for name, mutate := range map[string]func(*Message){
+		"id":   func(m *Message) { m.File.ID = "ffffffff-4e5f-6071-8293-a4b5c6d7e8f9" },
+		"name": func(m *Message) { m.File.Name = "evil.exe" },
+		"size": func(m *Message) { m.File.Size++ },
+		"sha":  func(m *Message) { m.File.SHA = "sha256:" + strings.Repeat("cd", 32) },
+		"key":  func(m *Message) { m.File.Key = bytes.Repeat([]byte{9}, 32) },
+		"drop": func(m *Message) { m.File = nil },
+	} {
+		c := m
+		f := *m.File
+		c.File = &f
+		mutate(&c)
+		if c.Verify(pub, ro.ID) {
+			t.Errorf("changing the file %s still verified", name)
+		}
+	}
+}
+
+func TestBadFileDetailsAreRefused(t *testing.T) {
+	owner, _, _, ro, _, _ := setup(t)
+	bad := map[string]func(*FileRef){
+		"id":           func(f *FileRef) { f.ID = "../../etc/passwd" },
+		"uppercase id": func(f *FileRef) { f.ID = strings.ToUpper(f.ID) },
+		"neg size":     func(f *FileRef) { f.Size = -1 },
+		"huge":         func(f *FileRef) { f.Size = MaxFileBytes + 1 },
+		"sha":          func(f *FileRef) { f.SHA = "md5:00" },
+		"short key":    func(f *FileRef) { f.Key = []byte{1} },
+		"no name":      func(f *FileRef) { f.Name = "" },
+		"long name":    func(f *FileRef) { f.Name = strings.Repeat("a", 256) },
+	}
+	for name, mutate := range bad {
+		f := fileRef()
+		mutate(f)
+		if _, err := Seal(ro.Key, ro.ID, ro.Gen, owner.priv, Message{ID: NewMessageID(), Body: "x", File: f, TS: 1}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }

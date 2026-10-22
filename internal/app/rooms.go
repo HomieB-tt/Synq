@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/HomieB-tt/synq/internal/api"
 	"github.com/HomieB-tt/synq/internal/chat"
 	"github.com/HomieB-tt/synq/internal/room"
+	"github.com/HomieB-tt/synq/internal/transfer"
 	"github.com/HomieB-tt/synq/internal/ws"
 )
 
@@ -31,8 +33,8 @@ import (
 // roomNoun is what the feature is called on screen and in help. It is the
 // one place to change if the name changes; the command word is roomCommandName.
 const (
-	roomNoun        = "room"
-	roomCommandName = "room"
+	roomNoun        = "blink"
+	roomCommandName = "blink"
 )
 
 // roomThreadPrefix marks a chat thread key as a room's. A real contact key
@@ -150,7 +152,7 @@ func (m Model) roomLabel(id string) string {
 	if e := m.roomEntryFor(id); e != nil {
 		return "# " + e.r.Name
 	}
-	return "# room"
+	return "# " + roomNoun
 }
 
 // roomSay adds a line the app wrote itself to the room's thread.
@@ -236,14 +238,14 @@ func (m Model) findRoom(name string) (*roomEntry, string) {
 
 // --- the :room command ---
 
-const roomUsage = "Usage: :room new <name> | invite <username> | accept [name] | decline | leave [name] | kick <username> | transfer <username|cancel> | end [name] confirm | members | list"
+const roomUsage = "Usage: :" + roomCommandName + " new <name> | invite <username> | accept [name] | decline | leave [name] | kick <username> | transfer <username|cancel> | end [name] confirm | members | list"
 
 func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 	if m.identity == nil {
 		return "Create an identity first. Restart Synq and choose \"Create your identity.\"", nil
 	}
 	if m.apiClient == nil {
-		return "Rooms need synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", nil
+		return "Blinks need synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", nil
 	}
 	if m.accessToken == "" {
 		return "Log in first - :register <username> if you haven't registered, or :login if you have.", nil
@@ -809,7 +811,7 @@ func (m Model) handleRoomList(msg roomListMsg) (tea.Model, tea.Cmd) {
 		}
 		name, ok := room.CleanName(row.Name)
 		if !ok {
-			name = "room"
+			name = roomNoun
 		}
 		switch row.Status {
 		case "INVITED":
@@ -847,6 +849,7 @@ func (m *Model) dropRoom(id string) {
 		return
 	}
 	e.r.Wipe()
+	m.purgeRoomFiles(id)
 	delete(m.rooms, id)
 	th := roomThread(id)
 	m.chatStore.Delete(th)
@@ -876,7 +879,7 @@ func (m *Model) handleRoomEvent(ev ws.Event) tea.Cmd {
 		}
 		name, ok := room.CleanName(ev.Name)
 		if !ok {
-			name = "room"
+			name = roomNoun
 		}
 		m.putRoom(&roomEntry{r: room.New(ev.Room, name, ev.From)})
 		owner := m.ownerLabel(ev.From)
@@ -1030,6 +1033,10 @@ func (m *Model) showRoomMessage(e *roomEntry, got room.Received) {
 	author := "someone"
 	if p, ok := e.r.Roster[got.From]; ok {
 		author = p.Username
+	}
+	if got.Msg.File != nil {
+		m.showRoomFile(e, got, author)
+		return
 	}
 	m.chatStore.AppendOrdered(th, chat.Message{
 		Body:   []byte(got.Msg.Body),
@@ -1290,6 +1297,169 @@ func (m Model) handleRoomSendFailed(msg roomSendFailedMsg) (tea.Model, tea.Cmd) 
 	}
 	m.commandMsg = fmt.Sprintf("That didn't reach synq-server: %v", msg.err)
 	return m, nil
+}
+
+// --- files ---
+
+// sendRoomFileCmd starts `:send <path>` in an open room: encrypt, upload
+// the ciphertext into the room, then (handleRoomFileSent) tell the members
+// what it is inside a signed, sealed message.
+func (m *Model) sendRoomFileCmd(path string) (string, tea.Cmd) {
+	id, _ := roomIDOf(m.chatActive)
+	e := m.roomEntryFor(id)
+	switch {
+	case e == nil || !e.joined:
+		return fmt.Sprintf("Join the %s first.", roomNoun), nil
+	case !e.r.Ready():
+		return "Waiting for the owner's key - you can share a file as soon as it arrives.", nil
+	case m.apiClient == nil || m.accessToken == "":
+		return "Sending files needs you to be logged in to synq-server.", nil
+	case m.wsClient == nil || m.identity == nil:
+		return "Not connected to synq-server - that wasn't sent.", nil
+	}
+	path = strings.Trim(strings.TrimSpace(path), `"'`)
+	path, err := transfer.ExpandHome(path)
+	if err != nil || path == "" {
+		return "Usage: :send <path to file>", nil
+	}
+	cache, err := m.ensureCache()
+	if err != nil {
+		return fmt.Sprintf("Couldn't prepare a scratch directory: %v", err), nil
+	}
+	client, token, scratch := m.apiClient, m.accessToken, cache.Root()
+	tr, tick := m.beginTransfer("", filepath.Base(path), true)
+	return "Encrypting and uploading…", tea.Batch(tick, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), fileTransferTimeout)
+		defer cancel()
+		ctx = transfer.WithProgress(ctx, tr.prog)
+		sent, err := transfer.SendRoomFile(ctx, client, token, id, path, scratch)
+		return roomFileSentMsg{room: id, sent: sent, err: err, unauthorized: api.IsUnauthorized(err), tr: tr}
+	})
+}
+
+type roomFileSentMsg struct {
+	room         string
+	sent         *transfer.Sent
+	err          error
+	unauthorized bool
+	tr           *activeTransfer
+}
+
+func (m Model) handleRoomFileSent(msg roomFileSentMsg) (tea.Model, tea.Cmd) {
+	m.endTransfer(msg.tr)
+	if msg.err != nil {
+		switch {
+		case msg.unauthorized:
+			m.commandMsg = "Your session token expired - renewing it. Run :send again in a moment."
+			return m, m.maybeReauthCmd()
+		case api.IsConflict(msg.err):
+			m.commandMsg = fmt.Sprintf("This %s is full of files (at most 20, or 300 MB in all). They're cleared when it ends.", roomNoun)
+		case api.IsNotFound(msg.err):
+			m.commandMsg = fmt.Sprintf("That %s has ended, or you're no longer in it.", roomNoun)
+		default:
+			m.commandMsg = fmt.Sprintf("Couldn't share the file: %v", msg.err)
+		}
+		return m, nil
+	}
+	e := m.roomEntryFor(msg.room)
+	if e == nil || !e.joined || !e.r.Ready() || m.wsClient == nil || m.identity == nil {
+		m.commandMsg = fmt.Sprintf("The %s ended before the file could be announced.", roomNoun)
+		return m, nil
+	}
+	sent := msg.sent
+	body := fmt.Sprintf("📎 %s (%s)", sent.Name, humanSize(sent.Size))
+	mid := room.NewMessageID()
+	sealed, err := room.Seal(e.r.Key, e.r.ID, e.r.Gen, m.identity.SigningPrivate, room.Message{
+		ID:   mid,
+		Body: body,
+		File: &room.FileRef{ID: sent.AttachmentID, Name: sent.Name, Size: sent.Size, SHA: sent.Hash, Key: sent.Key[:]},
+		TS:   time.Now().Unix(),
+	})
+	if err != nil {
+		m.commandMsg = fmt.Sprintf("Uploaded, but couldn't announce the file: %v", err)
+		return m, nil
+	}
+	frame, err := ws.EncodeRoomSend(e.r.ID, mid, sealed)
+	if err != nil {
+		m.commandMsg = fmt.Sprintf("Uploaded, but couldn't build the announcement: %v", err)
+		return m, nil
+	}
+	e.r.MarkSent(mid)
+	th := roomThread(e.r.ID)
+	m.chatStore.AppendOrdered(th, chat.Message{
+		Body:     []byte(body),
+		At:       time.Now(),
+		Outgoing: true,
+		ID:       mid,
+		Author:   m.username,
+	})
+	m.chatScroll, m.chatScrollFor = 0, th
+	m.commandMsg = fmt.Sprintf("Shared %s. Everyone in the %s can fetch it until the %s ends.", sent.Name, roomNoun, roomNoun)
+	client, id := m.wsClient, e.r.ID
+	return m, func() tea.Msg {
+		if err := client.Send(frame); err != nil {
+			return roomSendFailedMsg{id: id, mid: mid, err: err}
+		}
+		return nil
+	}
+}
+
+// showRoomFile lists a file a member shared. Nothing is downloaded until
+// the user picks it in :files.
+func (m *Model) showRoomFile(e *roomEntry, got room.Received, author string) {
+	f := got.Msg.File
+	th := roomThread(e.r.ID)
+	if m.entryByID(f.ID) != nil {
+		return
+	}
+	if len(m.files) >= maxFileEntries {
+		m.commandMsg = fmt.Sprintf("Too many pending files - ignored one shared in %s.", e.r.Name)
+		return
+	}
+	name := transfer.SafeName(f.Name)
+	var key [32]byte
+	copy(key[:], f.Key)
+	label := sanitizeForTerminal(author) + " in # " + sanitizeForTerminal(e.r.Name)
+	m.files = append(m.files, &fileEntry{
+		roomID:  e.r.ID,
+		contact: th,
+		from:    label,
+		offer:   &transfer.Offer{AttachmentID: f.ID, Name: name, Size: f.Size, CiphertextSHA256: f.SHA},
+		key:     &key,
+	})
+	m.chatStore.AppendOrdered(th, chat.Message{
+		Body:   fmt.Appendf(nil, "📎 %s (%s) - :files to view or save it", name, humanSize(f.Size)),
+		At:     time.Now(),
+		ID:     got.Msg.ID,
+		Author: author,
+		Seq:    got.Seq,
+	})
+	m.noteIncoming(th)
+	if !m.viewingThread(th) {
+		m.noteUnread(th, false)
+		m.commandMsg = fmt.Sprintf("%s shared %s (%s) in %s - :files", author, name, humanSize(f.Size), m.roomLabel(e.r.ID))
+	}
+}
+
+// purgeRoomFiles forgets every file shared in a room and deletes its
+// decrypted copies. Files the user saved with s are outside the cache and
+// stay: saving is the one way to keep one.
+func (m *Model) purgeRoomFiles(id string) {
+	kept := m.files[:0]
+	for _, f := range m.files {
+		if f.roomID != id {
+			kept = append(kept, f)
+			continue
+		}
+		if m.fileCache != nil {
+			_ = m.fileCache.Remove(f.offer.AttachmentID)
+		}
+		f.key, f.path = nil, ""
+	}
+	for i := len(kept); i < len(m.files); i++ {
+		m.files[i] = nil
+	}
+	m.files = kept
 }
 
 // --- replies ---

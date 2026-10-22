@@ -86,8 +86,8 @@ var commandSpecs = []cmdSpec{
 		prompt: "Folder for saved files", hint: "A folder that already exists. It is kept between launches."},
 
 	{name: roomCommandName, usage: "<new|invite|accept|decline|leave|kick|transfer|end|members|list> ...", group: grpChat, fill: true,
-		brief:  "group chat: make or manage a room",
-		detail: "Rooms are small, invite-only group chats of up to 16 people. :room new <name> makes one and you own it; :room invite <username> invites someone you are connected to; they join with :room accept <name>. Everyone's messages are end-to-end encrypted, and Ctrl+R in a room replies to a message. The owner can remove someone with :room kick <username> (the room key is changed so they can read nothing new) and hand the room to a member with :room transfer <username>, who takes it with :room accept (or refuses with :room decline). A room lasts only while its owner is here: :room end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
+		brief:  "group chat: make or manage a blink",
+		detail: "A blink is a small, invite-only group chat of up to 16 people that vanishes when it ends. :blink new <name> makes one and you own it; :blink invite <username> invites someone you are connected to; they join with :blink accept <name>. Everyone's messages are end-to-end encrypted, Ctrl+R replies to a message, and :send shares a file (members view or save it from :files; anything unsaved is wiped when the blink ends). The owner can remove someone with :blink kick <username> (the key is changed so they can read nothing new) and hand the blink to a member with :blink transfer <username>, who takes it with :blink accept (or refuses with :blink decline). A blink lasts only while its owner is here: :blink end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
 
 	// --- feed ---
 	{name: "post", usage: "[category]", group: grpFeed,

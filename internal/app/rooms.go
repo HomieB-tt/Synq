@@ -33,8 +33,8 @@ import (
 // roomNoun is what the feature is called on screen and in help. It is the
 // one place to change if the name changes; the command word is roomCommandName.
 const (
-	roomNoun        = "blink"
-	roomCommandName = "blink"
+	roomNoun        = "synapse"
+	roomCommandName = "synapse"
 )
 
 // roomThreadPrefix marks a chat thread key as a room's. A real contact key
@@ -245,7 +245,7 @@ func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 		return "Create an identity first. Restart Synq and choose \"Create your identity.\"", nil
 	}
 	if m.apiClient == nil {
-		return "Blinks need synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", nil
+		return "Synapses need synq-server configured. Set SYNQ_SERVER_URL and restart Synq (see README.md).", nil
 	}
 	if m.accessToken == "" {
 		return "Log in first - :register <username> if you haven't registered, or :login if you have.", nil

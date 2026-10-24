@@ -63,6 +63,9 @@ var commandSpecs = []cmdSpec{
 	{name: "block", usage: "<username> confirm", group: grpConnect, fill: true,
 		brief:  "block a user (silent, no undo)",
 		detail: "Block someone. They are not told, and there is no undo. Type the username and the word confirm."},
+	{name: "presence", usage: "[on|off]", group: grpConnect,
+		brief:  "show or hide your online status",
+		detail: "Your connected nodes see a dot beside your name on their Nodes tab: filled when you are online, hollow when you are not. :presence off hides you from them, and hides them from you; :presence on turns it back on. With no argument it shows the current setting. On by default."},
 	{name: "verify", usage: "<user|hex>", group: grpConnect,
 		brief:  "compare key fingerprints",
 		detail: "Show the fingerprint of the keys you and a contact share. Compare it with them over another channel, such as a call, to be sure nobody is impersonating either of you.",
@@ -86,8 +89,8 @@ var commandSpecs = []cmdSpec{
 		prompt: "Folder for saved files", hint: "A folder that already exists. It is kept between launches."},
 
 	{name: roomCommandName, usage: "<new|invite|accept|decline|leave|kick|transfer|end|members|list> ...", group: grpChat, fill: true,
-		brief:  "group chat: make or manage a blink",
-		detail: "A blink is a small, invite-only group chat of up to 16 people that vanishes when it ends. :blink new <name> makes one and you own it; :blink invite <username> invites someone you are connected to; they join with :blink accept <name>. Everyone's messages are end-to-end encrypted, Ctrl+R replies to a message, and :send shares a file (members view or save it from :files; anything unsaved is wiped when the blink ends). The owner can remove someone with :blink kick <username> (the key is changed so they can read nothing new) and hand the blink to a member with :blink transfer <username>, who takes it with :blink accept (or refuses with :blink decline). A blink lasts only while its owner is here: :blink end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
+		brief:  "group chat: make or manage a synapse",
+		detail: "A synapse is a small, invite-only group chat of up to 16 people that vanishes when it ends. :synapse new <name> makes one and you own it; :synapse invite <username> invites someone you are connected to; they join with :synapse accept <name>. Everyone's messages are end-to-end encrypted, Ctrl+R replies to a message, and :send shares a file (members view or save it from :files; anything unsaved is wiped when the synapse ends). The owner can remove someone with :synapse kick <username> (the key is changed so they can read nothing new) and hand the synapse to a member with :synapse transfer <username>, who takes it with :synapse accept (or refuses with :synapse decline). A synapse lasts only while its owner is here: :synapse end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
 
 	// --- feed ---
 	{name: "post", usage: "[category]", group: grpFeed,

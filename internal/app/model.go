@@ -335,6 +335,14 @@ type Model struct {
 	nodesErr    string
 	nodesSel    int // highlighted row, an index into groupNodes(...).entries()
 
+	// Online indicators (see presence.go). presenceKnown is true once
+	// the server has said whether you share; presenceShare is that
+	// answer (shown optimistically as on until then); online is the set
+	// of node user ids currently online.
+	presenceKnown bool
+	presenceShare bool
+	online        map[string]bool
+
 	// Feed tab (see feed.go). feedPosts is what's loaded so far, newest
 	// first, with feedIndex the selection; feedOpen is true while one
 	// post and its comments are showing. composeOpen/compose are the
@@ -768,6 +776,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case nodeActionMsg:
 		return m.handleNodeAction(msg)
 
+	case presenceSetMsg:
+		return m.handlePresenceSet(msg)
+
 	case fileSessionMsg:
 		return m.handleFileSession(msg)
 
@@ -978,6 +989,10 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 		// alongside whatever it asks for.
 		handle := m.handleRoomEvent(msg.event)
 		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), handle)
+
+	case msg.event.Type == ws.EventTypePresence:
+		m.handlePresenceEvent(msg.event)
+		return m, waitForWSFrameCmd(m.wsClient)
 
 	case msg.event.Type == ws.EventTypeNodeRequest:
 		// The frame carries only the requester's id; the refresh below
@@ -1537,6 +1552,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		result, blockCmd := m.blockNode(fields[1:])
 		return result, false, blockCmd
 
+	case "presence":
+		result, presenceCmd := m.presenceCommand(fields[1:])
+		return result, false, presenceCmd
+
 	case "post":
 		cat := ""
 		if len(fields) > 1 {
@@ -1663,7 +1682,7 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		}
 		return fmt.Sprintf("Startup checklist %s - effective from the next launch.", value), false, nil
 
-	case "blink":
+	case "synapse":
 		result, roomCmd := m.roomCommand(fields[1:])
 		return result, false, roomCmd
 

@@ -17,6 +17,7 @@ import (
 //	  { "type": "message",      "from": "<sender-user-id>", "payload": <...> }
 //	  { "type": "node_request", "from": "<requester-user-id>" }
 //	  { "type": "node_accepted", "from": "<other-user-id>" }
+//	  { "type": "node_presence", "user": "<node-user-id>", "online": <bool> }
 //	  { "type": "error",        "error": "rate_limited" }
 //	  { "type": "room_message", "room", "seq", "from", "payload" }
 //	  { "type": "room_ack",     "room", "cid", "seq" }
@@ -39,6 +40,9 @@ const (
 	EventTypeNodeRequest = "node_request"
 	// EventTypeNodeAccepted notifies From accepted your node request.
 	EventTypeNodeAccepted = "node_accepted"
+	// EventTypePresence says a connected node came online or went offline
+	// (User, Online). Only sent between nodes who both share presence.
+	EventTypePresence = "node_presence"
 	// EventTypeError is the only failure signal the server ever sends
 	// back over the socket.
 	EventTypeError = "error"
@@ -86,6 +90,9 @@ type Event struct {
 	Seq    int64
 	Cid    string
 	Reason string
+
+	// node_presence only: whether User is now online.
+	Online bool
 }
 
 // IsRateLimited reports whether e is the server's self-delivered
@@ -120,6 +127,8 @@ type inboundFrame struct {
 	Seq    int64  `json:"seq"`
 	Cid    string `json:"cid"`
 	Reason string `json:"reason"`
+
+	Online bool `json:"online"`
 }
 
 // EncodeSend builds the single outgoing frame shape synq-server
@@ -176,6 +185,12 @@ func DecodeFrame(data []byte) (Event, error) {
 			return Event{}, fmt.Errorf("ws: %s frame has no from", f.Type)
 		}
 		return Event{Type: f.Type, From: f.From}, nil
+
+	case EventTypePresence:
+		if f.User == "" {
+			return Event{}, errors.New("ws: node_presence frame has no user")
+		}
+		return Event{Type: f.Type, User: f.User, Online: f.Online}, nil
 
 	case EventTypeRoomMessage:
 		if f.Room == "" || f.From == "" || f.Seq < 1 {

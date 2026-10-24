@@ -279,3 +279,19 @@ func TestEncodeRoomDirect(t *testing.T) {
 		t.Fatal("empty recipient accepted")
 	}
 }
+
+func TestDecodeNodePresence(t *testing.T) {
+	for _, online := range []bool{true, false} {
+		frame := `{"type":"node_presence","user":"usr_a","online":` + map[bool]string{true: "true", false: "false"}[online] + `}`
+		got, err := DecodeFrame([]byte(frame))
+		if err != nil {
+			t.Fatalf("DecodeFrame: %v", err)
+		}
+		if got.Type != EventTypePresence || got.User != "usr_a" || got.Online != online || got.Payload != nil {
+			t.Errorf("got %+v, want presence for usr_a online=%v", got, online)
+		}
+	}
+	if _, err := DecodeFrame([]byte(`{"type":"node_presence","online":true}`)); err == nil {
+		t.Error("a presence frame with no user decoded")
+	}
+}

@@ -238,6 +238,7 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	m.unread, m.deferredFrames, m.resolvingSenders = nil, nil, nil
 	m.nodesLoaded = false
 	m.nodesErr = ""
+	m.presenceKnown, m.presenceShare, m.online = false, false, nil
 	m.fileSession = ""
 	m.files = nil
 	m.filePickerOpen = false

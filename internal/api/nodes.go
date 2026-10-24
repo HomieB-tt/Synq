@@ -64,3 +64,25 @@ func (c *Client) AcceptNodeRequest(ctx context.Context, accessToken, requesterID
 func (c *Client) BlockNode(ctx context.Context, accessToken, otherID string) error {
 	return c.do(ctx, http.MethodPost, "/nodes/"+otherID+"/block", accessToken, nil, nil)
 }
+
+// Presence is the answer to GET /nodes/presence: whether the caller
+// shares their own presence, and which of their active nodes are online
+// right now. Online is always empty while Share is false - hiding
+// yourself hides everyone else from you too.
+type Presence struct {
+	Share  bool     `json:"share"`
+	Online []string `json:"online"`
+}
+
+// GetPresence asks which active nodes are online right now.
+func (c *Client) GetPresence(ctx context.Context, accessToken string) (Presence, error) {
+	var resp Presence
+	err := c.do(ctx, http.MethodGet, "/nodes/presence", accessToken, nil, &resp)
+	return resp, err
+}
+
+// SetPresence turns the caller's online/offline visibility on or off.
+func (c *Client) SetPresence(ctx context.Context, accessToken string, share bool) error {
+	return c.do(ctx, http.MethodPut, "/users/me/presence", accessToken,
+		map[string]bool{"share": share}, nil)
+}

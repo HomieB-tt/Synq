@@ -99,7 +99,10 @@ func (m Model) handleRegisterResult(msg registerResultMsg) (tea.Model, tea.Cmd) 
 	// Now that there's an access token, start the WS connection the
 	// same way Init does at startup - this is the only other place
 	// that can transition "no token" into "should be connected".
-	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd(), m.fetchRoomsCmd(), m.fetchFeedCmd(0))
+	// Computed first: restartLatencyCmd bumps a field of m, and the
+	// returned copy must carry it.
+	latency := m.restartLatencyCmd()
+	return m, tea.Batch(startWSCmd(m.apiClient.BaseURL, m.accessToken), m.startFileSession(), m.fetchNodesCmd(), m.fetchRoomsCmd(), m.fetchFeedCmd(0), latency)
 }
 
 // --- :login (manual) ---
@@ -158,6 +161,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	m.reauthRetryAfter = time.Time{}
 	m.reauthInFlight = false
 	m.commandMsg = fmt.Sprintf("Logged in as %s.", m.username)
+	latency := m.restartLatencyCmd() // before the return copies m
 	return m, tea.Batch(
 		startWSCmd(m.apiClient.BaseURL, m.accessToken),
 		uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username),
@@ -165,6 +169,7 @@ func (m Model) handleLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 		m.fetchNodesCmd(),
 		m.fetchRoomsCmd(),
 		m.fetchFeedCmd(0),
+		latency,
 	)
 }
 
@@ -239,6 +244,8 @@ func (m Model) handleLogoutResult(msg logoutResultMsg) (tea.Model, tea.Cmd) {
 	m.nodesLoaded = false
 	m.nodesErr = ""
 	m.presenceKnown, m.presenceShare, m.online = false, false, nil
+	m.latencyGen++
+	m.latency = 0
 	m.fileSession = ""
 	m.files = nil
 	m.filePickerOpen = false

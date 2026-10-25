@@ -168,7 +168,7 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | `:welcome` | Show the getting-started guide again. It is shown once, on first launch. |
 | `:help` | Same as pressing `?` - the full key/command reference. |
 | `:server [address\|reset]` | Show or change the synq-server Synq connects to. Takes effect after a restart. |
-| `:ping` | Time a few requests to the server (first one includes connection setup) to tell a slow server from a slow link. |
+| `:ping` | Time a few requests to the server (first one includes connection setup) to tell a slow server from a slow link. The header also shows the latest round trip beside `● online` (e.g. `● online · 158 ms`), refreshed every 30 s while logged in, when it fits. |
 | `:boot on\|off` | Show (or stop showing) the startup checklist on the next launch. On by default; the splash itself is always skippable with any key. |
 | `:quit` | Same as pressing `q`. |
 

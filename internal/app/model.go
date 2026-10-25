@@ -339,6 +339,12 @@ type Model struct {
 	// the server has said whether you share; presenceShare is that
 	// answer (shown optimistically as on until then); online is the set
 	// of node user ids currently online.
+	// Header latency readout (see latency.go). latencyGen identifies the
+	// current polling loop so a restart (logout, login) cannot leave two
+	// running; latency is the last good round trip, zero when unknown.
+	latencyGen int
+	latency    time.Duration
+
 	presenceKnown bool
 	presenceShare bool
 	online        map[string]bool
@@ -627,6 +633,7 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 // into the interactive TUI.
 func Run(id *crypto.Identity, store *db.KeyStore, session Session) error {
 	m := New(id, store, session)
+	m.theme = startingTheme(m.theme, store, detectColorProfile())
 	// The getting-started guide appears once, over the main UI after the
 	// startup splash, and is remembered when dismissed. It is set here and
 	// not in New so that building a Model (tests, mostly) never starts
@@ -666,6 +673,7 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.startFileSession())
 		cmds = append(cmds, m.fetchNodesCmd())
 		cmds = append(cmds, m.fetchRoomsCmd())
+		cmds = append(cmds, latencyTickCmd(m.latencyGen, 0))
 	}
 	return tea.Batch(cmds...)
 }
@@ -775,6 +783,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case nodeActionMsg:
 		return m.handleNodeAction(msg)
+
+	case latencyTickMsg:
+		return m.handleLatencyTick(msg)
+
+	case latencyResultMsg:
+		return m.handleLatencyResult(msg)
 
 	case presenceSetMsg:
 		return m.handlePresenceSet(msg)
@@ -1916,6 +1930,14 @@ func (m Model) renderHeader() string {
 	width := m.width
 	if width <= 0 {
 		width = 80
+	}
+	// The round-trip time rides next to "online" when there is room
+	// for it; on a narrow terminal the tabs keep their space.
+	if lat := m.latencyLabel(); lat != "" {
+		withLat := status + m.theme.Muted.Render(" · "+lat)
+		if width-lipgloss.Width(tabs)-lipgloss.Width(withLat) >= 1 {
+			status = withLat
+		}
 	}
 
 	gap := width - lipgloss.Width(tabs) - lipgloss.Width(status)

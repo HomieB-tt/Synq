@@ -138,6 +138,8 @@ func run() error {
 	}
 	defer ks.Close()
 
+	initUI(ks)
+
 	apiClient, err := newAPIClient(ks)
 	if err != nil {
 		return err
@@ -348,13 +350,13 @@ func keyStorePath() (string, error) {
 // accepted right away. The caller owns zeroing it once truly done -
 // see runLanding, which does so via offerRegistration.
 func createIdentity(ks *db.KeyStore) (*crypto.Identity, []byte, error) {
-	fmt.Println("No identity found on this device - let's create one.")
-	fmt.Println()
-	fmt.Println("Your passphrase encrypts your identity keys on disk. There is no")
-	fmt.Println("password reset and no recovery: if you forget it, this identity")
-	fmt.Println("- and everything tied to it - is permanently lost. Choose something")
-	fmt.Println("memorable and back it up somewhere safe (e.g. a password manager).")
-	fmt.Println()
+	out := uiStdout()
+	uiHeading(out, "Create your identity")
+	uiNotice(out, "There is no recovery", []string{
+		"Your passphrase encrypts your identity keys on disk. There is no password reset: if you forget it, this identity - and everything tied to it - is permanently lost.",
+		"",
+		"Choose something memorable and back it up somewhere safe, such as a password manager.",
+	})
 
 	passphrase, err := promptNewPassphrase()
 	if err != nil {
@@ -378,7 +380,7 @@ func createIdentity(ks *db.KeyStore) (*crypto.Identity, []byte, error) {
 		return nil, nil, fmt.Errorf("save identity: %w", err)
 	}
 
-	fmt.Println("Identity created.")
+	uiOK(out, "Identity created.")
 	return id, passphrase, nil
 }
 
@@ -400,8 +402,11 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 		return app.Session{}
 	}
 
-	fmt.Println()
-	fmt.Print("Register a username with synq-server now? [y/N]: ")
+	out := uiStdout()
+	uiHeading(out, "Claim a username")
+	uiHint(out, "A username lets people send you node requests. You can skip this and run :register inside Synq later.")
+	fmt.Fprintln(out)
+	fmt.Fprint(out, uiAsk("Register a username with synq-server now? [y/N]"))
 	choice, err := readLine()
 	if err != nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(choice)), "y") {
 		return app.Session{API: apiClient}
@@ -409,7 +414,7 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 
 	username, err := promptUsername()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Registration skipped:", err)
+		uiFail(uiStderr(), "Registration skipped: "+err.Error())
 		return app.Session{API: apiClient}
 	}
 
@@ -418,8 +423,9 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 
 	tokens, err := registerUsername(ctx, apiClient, id, username)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Registration failed:", err)
-		fmt.Fprintf(os.Stderr, "You can try again later from inside Synq with :register %s\n", username)
+		serr := uiStderr()
+		uiFail(serr, "Registration failed: "+err.Error())
+		uiHint(serr, fmt.Sprintf("You can try again later from inside Synq with :register %s", username))
 		return app.Session{API: apiClient}
 	}
 
@@ -430,12 +436,13 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 		// failed, since retrying :register <username> would now just
 		// fail with "username taken" against the account that just
 		// succeeded.
-		fmt.Fprintf(os.Stderr, "Registered as %s, but failed to save that locally: %v\n", username, err)
-		fmt.Fprintln(os.Stderr, "Try :login from inside Synq to pick the session back up.")
+		serr := uiStderr()
+		uiFail(serr, fmt.Sprintf("Registered as %s, but failed to save that locally: %v", username, err))
+		uiHint(serr, "Try :login from inside Synq to pick the session back up.")
 		return app.Session{API: apiClient}
 	}
 
-	fmt.Println("Registered as", username)
+	uiOK(out, "Registered as "+username)
 	return app.Session{
 		API:          apiClient,
 		Username:     username,
@@ -452,7 +459,9 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 // deliberately doesn't try to duplicate them and risk rejecting
 // something the server would have accepted, or vice versa.
 func promptUsername() (string, error) {
-	fmt.Print("Choose a username (this is permanent - synq-server has no rename yet): ")
+	out := uiStdout()
+	uiHint(out, "Your username is permanent - synq-server has no rename yet.")
+	fmt.Fprint(out, uiAsk("Choose a username"))
 	line, err := readLine()
 	if err != nil {
 		return "", err
@@ -631,10 +640,10 @@ func unlockIdentity(ks *db.KeyStore) (id *crypto.Identity, refreshToken string, 
 		zeroBytes(pw)
 
 		attempts++
-		fmt.Fprintln(os.Stderr, "Incorrect passphrase. Try again (Ctrl+C to quit).")
+		serr := uiStderr()
+		uiFail(serr, "Incorrect passphrase. Try again (Ctrl+C to quit).")
 		if attempts == 2 {
-			fmt.Fprintln(os.Stderr,
-				"Forgot it? Quit and re-run synq with --forget to archive this identity and start over.")
+			uiHint(serr, "Forgot it? Quit and re-run synq with --forget to archive this identity and start over.")
 		}
 	}
 }
@@ -661,7 +670,7 @@ func promptNewPassphrase() ([]byte, error) {
 
 		zeroBytes(first)
 		zeroBytes(second)
-		fmt.Fprintln(os.Stderr, "Passphrases did not match. Try again.")
+		uiFail(uiStderr(), "Passphrases did not match. Try again.")
 	}
 }
 
@@ -686,7 +695,8 @@ var passphraseInput *os.File
 // echoing it. Falls back to a visible bufio read when stdin isn't an
 // interactive terminal (e.g. piped input during scripted testing).
 func promptPassphrase(label string) ([]byte, error) {
-	fmt.Fprint(os.Stderr, label)
+	// Labels arrive as "Passphrase: " - drawn as an accent prompt instead.
+	fmt.Fprint(uiStderr(), uiAsk(strings.TrimSuffix(label, ": ")))
 
 	in := os.Stdin
 	if passphraseInput != nil {

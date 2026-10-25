@@ -238,7 +238,7 @@ func (m Model) findRoom(name string) (*roomEntry, string) {
 
 // --- the :room command ---
 
-const roomUsage = "Usage: :" + roomCommandName + " new <name> | invite <username> | accept [name] | decline | leave [name] | kick <username> | transfer <username|cancel> | end [name] confirm | members | list"
+const roomUsage = "Usage: :" + roomCommandName + " new <name> | invite <username> | accept [name] | decline | leave [name] | kick <username> | transfer <username|cancel> | end [name] confirm | members | connect <username> | list"
 
 func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 	if m.identity == nil {
@@ -405,6 +405,27 @@ func (m *Model) roomCommand(args []string) (string, tea.Cmd) {
 			return fmt.Sprintf("Ending %s removes it and everything said in it for everyone. Type :%s end confirm to do it.", e.r.Name, roomCommandName), nil
 		}
 		return fmt.Sprintf("Ending %s...", e.r.Name), m.roomOpCmd("end", e.r.ID, "")
+
+	case "connect":
+		// The one way two members who are not nodes get to each other:
+		// a node request, sent only to someone you can see in the
+		// roster. Nobody is ever added to a synapse by a stranger, and
+		// this does not skip the other side's say - they still accept.
+		if len(args) != 2 {
+			return fmt.Sprintf("Usage: :%s connect <username>", roomCommandName), nil
+		}
+		e, why := m.findRoom("")
+		if e == nil {
+			return why, nil
+		}
+		_, username, ok := m.roomMemberNamed(e, args[1], false)
+		if !ok {
+			return fmt.Sprintf("%s isn't in this %s.", args[1], roomNoun), nil
+		}
+		if username == m.username {
+			return "That's you.", nil
+		}
+		return m.requestNode(username)
 
 	case "members", "who":
 		e, why := m.findRoom(strings.Join(args[1:], " "))

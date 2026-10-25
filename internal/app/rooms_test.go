@@ -1272,3 +1272,26 @@ func TestSharingFailuresSayWhyAndAnnounceNothing(t *testing.T) {
 		}
 	}
 }
+
+func TestSynapseConnectSendsANodeRequestToAMemberOnly(t *testing.T) {
+	owner, _, _ := twoMembers(t)
+	owner = loggedIn(t, owner)
+	owner.chatActive = roomThread(testRoomID)
+
+	if res, cmd := owner.roomCommand([]string{"connect", "bob"}); cmd == nil || !strings.Contains(res, "node request to bob") {
+		t.Errorf("connect: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"connect", "nobody"}); cmd != nil || !strings.Contains(res, "isn't in") {
+		t.Errorf("connect to a non-member: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"connect", "olive"}); cmd != nil || !strings.Contains(res, "That's you") {
+		t.Errorf("connect to self: %q", res)
+	}
+	if res, cmd := owner.roomCommand([]string{"connect"}); cmd != nil || !strings.Contains(res, "Usage") {
+		t.Errorf("bare connect: %q", res)
+	}
+	owner.nodes = []api.NodeRelationship{rel("olive", "bob", api.NodeStatusActive)}
+	if res, cmd := owner.roomCommand([]string{"connect", "bob"}); cmd != nil || !strings.Contains(res, "already your node") {
+		t.Errorf("connect to an existing node: %q", res)
+	}
+}

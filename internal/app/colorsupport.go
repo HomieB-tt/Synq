@@ -28,6 +28,21 @@ func richColor(p colorprofile.Profile) bool {
 	return p == colorprofile.TrueColor || p == colorprofile.ANSI256
 }
 
+// StartingTheme is the theme the app will open with, for the screens that
+// run before it (the first-run menu) so they match: the saved theme if
+// there is one, else the default, else system on a 16-colour terminal.
+func StartingTheme(store *db.KeyStore) styles.Theme {
+	th := styles.Default()
+	if store != nil {
+		if name, err := store.LoadPreference(db.PrefTheme); err == nil {
+			if p, ok := styles.All[name]; ok {
+				th = styles.New(p)
+			}
+		}
+	}
+	return startingTheme(th, store, detectColorProfile())
+}
+
 // startingTheme is the theme to open with. A theme the user chose is
 // never overridden; only the default is replaced, and only when the
 // terminal could not do the default justice. :theme still changes it.

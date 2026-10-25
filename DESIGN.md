@@ -105,6 +105,7 @@ This document captures the architectural decisions made for the `synq` client du
 **Decision:** a device with no identity yet is shown a menu before anything else happens, rather than being walked straight into passphrase creation:
 
 - **Browse the public feed as a guest** — launches the same Bubble Tea app used for everything else, with a `nil` identity. This is not a separate, stripped-down "guest UI" — it's the real TUI, with real theme switching (`:theme`, fully functional, since it only depends on the local preferences store, not an identity) and a real Feed tab. Nodes, Chat, and the identity-dependent parts of Profile show a clear call-to-action explaining an identity is needed, rather than being hidden or disabled outright. `:verify` and `:github` are blocked with a clear message, since both fundamentally require an identity to attach their result to.
+- The menu is its own small Bubble Tea screen, centred in the terminal and drawn in the theme the app will open with (saved theme, else the default, else `system` on a 16-colour terminal). A little motion - the wordmark draws in, a highlight sweeps across it, the tagline types itself out - stays out of the way of the keys (1-3, arrows and Enter all work at once); `SYNQ_NO_ANIMATION=1` shows it still. It drops detail (descriptions, blurb, big wordmark) as the terminal shrinks, and falls back to a plain numbered prompt when input or output is not a terminal.
 - **Create your identity** — the existing, already-tested passphrase creation flow, unchanged.
 - **Quit.**
 

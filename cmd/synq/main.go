@@ -235,10 +235,12 @@ func newAPIClient(ks *db.KeyStore) (*api.Client, error) {
 // a valid answer is saved so it is never asked again.
 func askServerURL(ks *db.KeyStore) (*api.Client, error) {
 	allowInsecure := os.Getenv("SYNQ_ALLOW_INSECURE_HTTP") == "1"
-	fmt.Println()
-	fmt.Println("Synq needs the address of a synq-server to chat, post and share files.")
+	th := app.StartingTheme(ks)
+	out := landingOutput()
+	fmt.Fprintln(out)
+	noteLine(out, th, "hint", "Synq needs the address of a synq-server to chat, post and share files.")
 	for {
-		fmt.Print("Server address (e.g. https://synq.example.com), or Enter to skip: ")
+		fmt.Fprint(out, promptLine(th, "Server address (e.g. https://synq.example.com), or Enter to skip"))
 		line, err := readLine()
 		if err != nil {
 			return nil, err
@@ -268,38 +270,16 @@ func validateServerURL(raw string, allowInsecure bool) error {
 	return api.ValidateServerURL(raw, allowInsecure)
 }
 
-// synqBanner is the block-letter wordmark drawn above the landing
-// menu, so the first thing a new device sees looks like the product
-// rather than a bare numbered list. It has no color: this runs before
-// any Bubble Tea styling exists (and before we know the terminal's
-// capabilities - DESIGN.md section 7), so plain UTF-8 is all it can
-// safely rely on.
-const synqBanner = `██████╗ ██╗   ██╗███╗   ██╗██████╗ 
-██╔════╝╚██╗ ██╔╝████╗  ██║██╔══██╗
-█████╗   ╚████╔╝ ██╔██╗ ██║██████╔╝
-██╔══╝    ╚██╔╝  ██║╚██╗██║██╔══██╗
-███████╗  ██╔╝   ██║ ╚████║██████╔╝
-╚══════╝  ╚═╝    ╚═╝  ╚═══╝╚═════╝ `
-
 // runLanding is shown on a device with no identity yet, offering a
 // choice before committing to identity creation - see DESIGN.md
 // section 10 for why: creating an identity is a one-way, no-recovery
 // commitment (section 1), so forcing it as the only option on a brand
 // new device isn't the right default.
 func runLanding(ks *db.KeyStore, apiClient *api.Client) error {
+	th := app.StartingTheme(ks)
+	out := landingOutput()
 	for {
-		fmt.Println()
-		fmt.Println(synqBanner)
-		fmt.Println()
-		fmt.Println("Welcome to Synq. No identity exists on this device yet.")
-		fmt.Println()
-		fmt.Println("  1) Browse the public feed as a guest")
-		fmt.Println("  2) Create your identity")
-		fmt.Println("  3) Quit")
-		fmt.Println()
-		fmt.Print("Choose an option: ")
-
-		choice, err := readLine()
+		choice, err := landingChoice(out, th, ks)
 		if err != nil {
 			return err
 		}
@@ -334,7 +314,7 @@ func runLanding(ks *db.KeyStore, apiClient *api.Client) error {
 			return nil
 
 		default:
-			fmt.Println("Please enter 1, 2, or 3.")
+			noteLine(out, th, "error", "Please enter 1, 2, or 3.")
 		}
 	}
 }

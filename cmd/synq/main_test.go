@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/HomieB-tt/synq/internal/db"
 )
 
 func writeFile(t *testing.T, path, contents string) {
@@ -95,5 +97,32 @@ func TestArchiveKeyStoreNeverOverwritesAnEarlierArchive(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("%s missing: %v", filepath.Base(path), err)
 		}
+	}
+}
+
+func TestSavedUsernameAtReadsWithoutCreatingAnything(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "none.db")
+	if got := savedUsernameAt(missing); got != "" {
+		t.Errorf("missing store gave %q", got)
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Error("looking created the store")
+	}
+
+	path := filepath.Join(dir, "synq.db")
+	ks, err := db.OpenKeyStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := savedUsernameAt(path); got != "" {
+		t.Errorf("no username saved, got %q", got)
+	}
+	if err := ks.SavePreference(db.PrefUsername, " alice "); err != nil {
+		t.Fatal(err)
+	}
+	ks.Close()
+	if got := savedUsernameAt(path); got != "alice" {
+		t.Errorf("saved username = %q", got)
 	}
 }

@@ -63,6 +63,9 @@ var commandSpecs = []cmdSpec{
 	{name: "block", usage: "<username> confirm", group: grpConnect, fill: true,
 		brief:  "block a user (silent, no undo)",
 		detail: "Block someone. They are not told, and there is no undo. Type the username and the word confirm."},
+	{name: "presence", usage: "[on|off]", group: grpConnect,
+		brief:  "show or hide your online status",
+		detail: "Your connected nodes see a dot beside your name on their Nodes tab: filled when you are online, hollow when you are not. :presence off hides you from them, and hides them from you; :presence on turns it back on. With no argument it shows the current setting. On by default."},
 	{name: "verify", usage: "<user|hex>", group: grpConnect,
 		brief:  "compare key fingerprints",
 		detail: "Show the fingerprint of the keys you and a contact share. Compare it with them over another channel, such as a call, to be sure nobody is impersonating either of you.",
@@ -85,6 +88,10 @@ var commandSpecs = []cmdSpec{
 		detail: "Choose the folder that saved files are written to. Nothing is saved until you choose to, and saving never overwrites an existing file.",
 		prompt: "Folder for saved files", hint: "A folder that already exists. It is kept between launches."},
 
+	{name: roomCommandName, usage: "<new|invite|accept|decline|leave|kick|transfer|end|members|connect|list> ...", group: grpChat, fill: true,
+		brief:  "group chat: make or manage a synapse",
+		detail: "A synapse is a small, invite-only group chat of up to 16 people that vanishes when it ends. :synapse new <name> makes one and you own it; :synapse invite <username> invites someone you are connected to; they join with :synapse accept <name>. Everyone's messages are end-to-end encrypted, Ctrl+R replies to a message, and :send shares a file (members view or save it from :files; anything unsaved is wiped when the synapse ends). To become nodes with someone you met here, :synapse connect <username> sends them a node request (they still have to accept). The owner can remove someone with :synapse kick <username> (the key is changed so they can read nothing new) and hand the synapse to a member with :synapse transfer <username>, who takes it with :synapse accept (or refuses with :synapse decline). A synapse lasts only while its owner is here: :synapse end confirm, quitting Synq, or the owner going offline ends it for everyone and wipes it - so hand it over first if you need to leave."},
+
 	// --- feed ---
 	{name: "post", usage: "[category]", group: grpFeed,
 		brief:  "write a Feed post (project|hiring|general)",
@@ -96,7 +103,7 @@ var commandSpecs = []cmdSpec{
 	// --- account ---
 	{name: "register", usage: "<username>", group: grpAccount,
 		brief:  "register a username (permanent)",
-		detail: "Claim your username on synq-server. It is permanent - there is no rename yet - and it is how people find and connect with you. Needs SYNQ_SERVER_URL to be set.",
+		detail: "Claim your username on synq-server. There is no rename (:delete-account removes the account and frees the name) and it is how people find and connect with you. Needs SYNQ_SERVER_URL to be set.",
 		prompt: "Choose a username", hint: "This is permanent and cannot be renamed later."},
 	{name: "login", group: grpAccount,
 		brief:  "log in again after :logout",
@@ -104,6 +111,9 @@ var commandSpecs = []cmdSpec{
 	{name: "logout", group: grpAccount,
 		brief:  "revoke all sessions and disconnect",
 		detail: "Sign out everywhere and disconnect. Run :login to come back."},
+	{name: "delete-account", usage: "<username> confirm", group: grpAccount, fill: true,
+		brief:  "delete your account on the server (permanent)",
+		detail: "Delete your account on synq-server for good: your nodes, posts, sessions, files and any synapses you own go with it, and your username becomes free to claim again. Your identity on this device is kept, so :register can claim a username again. Type your own username and the word confirm."},
 	{name: "name", usage: "<text>", group: grpAccount,
 		brief:  "set a local display name",
 		detail: "Set a display name that only you see on this machine. It is not your username and the server never knows it. :name clear removes it.",

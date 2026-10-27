@@ -335,6 +335,20 @@ type Model struct {
 	nodesErr    string
 	nodesSel    int // highlighted row, an index into groupNodes(...).entries()
 
+	// Online indicators (see presence.go). presenceKnown is true once
+	// the server has said whether you share; presenceShare is that
+	// answer (shown optimistically as on until then); online is the set
+	// of node user ids currently online.
+	// Header latency readout (see latency.go). latencyGen identifies the
+	// current polling loop so a restart (logout, login) cannot leave two
+	// running; latency is the last good round trip, zero when unknown.
+	latencyGen int
+	latency    time.Duration
+
+	presenceKnown bool
+	presenceShare bool
+	online        map[string]bool
+
 	// Feed tab (see feed.go). feedPosts is what's loaded so far, newest
 	// first, with feedIndex the selection; feedOpen is true while one
 	// post and its comments are showing. composeOpen/compose are the
@@ -532,6 +546,14 @@ type Model struct {
 	chatMarkIdx   int
 	chatMarkCount int
 
+	// rooms holds every room this client is in or invited to, by room id
+	// (rooms.go). Memory only.
+	rooms map[string]*roomEntry
+
+	// quitPrompt is set while the "you own an open room, quit anyway?"
+	// question is on screen.
+	quitPrompt bool
+
 	quitting bool
 }
 
@@ -611,6 +633,7 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 // into the interactive TUI.
 func Run(id *crypto.Identity, store *db.KeyStore, session Session) error {
 	m := New(id, store, session)
+	m.theme = startingTheme(m.theme, store, detectColorProfile())
 	// The getting-started guide appears once, over the main UI after the
 	// startup splash, and is remembered when dismissed. It is set here and
 	// not in New so that building a Model (tests, mostly) never starts
@@ -649,6 +672,8 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, uploadBoxKeySigCmd(m.apiClient, m.accessToken, m.identity, m.username))
 		cmds = append(cmds, m.startFileSession())
 		cmds = append(cmds, m.fetchNodesCmd())
+		cmds = append(cmds, m.fetchRoomsCmd())
+		cmds = append(cmds, latencyTickCmd(m.latencyGen, 0))
 	}
 	return tea.Batch(cmds...)
 }
@@ -723,6 +748,24 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatResolveResultMsg:
 		return m.handleChatResolveResult(msg)
 
+	case roomCreatedMsg:
+		return m.handleRoomCreated(msg)
+
+	case roomOpMsg:
+		return m.handleRoomOp(msg)
+
+	case roomDetailMsg:
+		return m.handleRoomDetail(msg)
+
+	case roomListMsg:
+		return m.handleRoomList(msg)
+
+	case roomSendFailedMsg:
+		return m.handleRoomSendFailed(msg)
+
+	case roomFileSentMsg:
+		return m.handleRoomFileSent(msg)
+
 	case feedLoadedMsg:
 		return m.handleFeedLoaded(msg)
 
@@ -740,6 +783,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case nodeActionMsg:
 		return m.handleNodeAction(msg)
+
+	case latencyTickMsg:
+		return m.handleLatencyTick(msg)
+
+	case latencyResultMsg:
+		return m.handleLatencyResult(msg)
+
+	case accountDeletedMsg:
+		return m.handleAccountDeleted(msg)
+
+	case presenceSetMsg:
+		return m.handlePresenceSet(msg)
 
 	case fileSessionMsg:
 		return m.handleFileSession(msg)
@@ -856,6 +911,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.booting = false
 			return m, nil
 		}
+		if m.quitPrompt {
+			return m.updateQuitPrompt(msg)
+		}
 		if m.welcomeOpen {
 			return m.updateWelcome(msg)
 		}
@@ -941,6 +999,17 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 		// so a slow reply can't delay the next frame.
 		handle := m.handleIncomingPayload(contact, msg.event.Payload)
 		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), handle)
+
+	case isRoomEvent(msg.event.Type):
+		// Room traffic: invitations, joins, messages, acks, the end.
+		// rooms.go decides what each one means; the pump re-arms
+		// alongside whatever it asks for.
+		handle := m.handleRoomEvent(msg.event)
+		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), handle)
+
+	case msg.event.Type == ws.EventTypePresence:
+		m.handlePresenceEvent(msg.event)
+		return m, waitForWSFrameCmd(m.wsClient)
 
 	case msg.event.Type == ws.EventTypeNodeRequest:
 		// The frame carries only the requester's id; the refresh below
@@ -1106,12 +1175,7 @@ func (m Model) updateNormalMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q", "ctrl+c":
-		m.quitting = true
-		if m.wsClient != nil {
-			m.wsClient.Close()
-		}
-		m.chatStore.Purge()
-		return m, m.quitCmd()
+		return m.requestQuit()
 
 	case "1":
 		m.activeTab = tabFeed
@@ -1200,12 +1264,7 @@ func (m Model) execCommand(line string) (tea.Model, tea.Cmd) {
 	result, quit, cmd := m.runCommand(strings.TrimSpace(line))
 	m.commandMsg = result
 	if quit {
-		m.quitting = true
-		if m.wsClient != nil {
-			m.wsClient.Close()
-		}
-		m.chatStore.Purge()
-		return m, m.quitCmd()
+		return m.requestQuit()
 	}
 	return m, cmd
 }
@@ -1218,11 +1277,22 @@ func (m Model) execCommand(line string) (tea.Model, tea.Cmd) {
 func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		// In a room, Esc first drops a reply you had selected.
+		if id, ok := roomIDOf(m.chatActive); ok && m.cancelReply(id) {
+			return m, nil
+		}
 		// Back to the thread list, not out of the Chat tab entirely -
 		// symmetric with how Esc closes the theme picker back to
 		// whatever was showing before, not all the way out of Profile.
 		m.chatActive = ""
 		m.chatInput, m.chatBack = "", 0
+		return m, nil
+
+	case "ctrl+r":
+		// Reply: step through the room's messages, newest first.
+		if id, ok := roomIDOf(m.chatActive); ok {
+			m.cycleReply(id)
+		}
 		return m, nil
 
 	case "ctrl+p":
@@ -1254,6 +1324,11 @@ func (m Model) updateChatCompose(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if body == "" {
 			m.chatInput, m.chatBack = "", 0
 			return m, nil
+		}
+		if id, ok := roomIDOf(m.chatActive); ok {
+			// A room: sealed under the room key and sent to the room,
+			// not to one contact (rooms.go).
+			return m.sendRoomText(id, body)
 		}
 		if reason := m.keyBlockReason(m.chatActive); reason != "" {
 			// Refused before the local echo: a draft that can't be
@@ -1494,6 +1569,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		result, blockCmd := m.blockNode(fields[1:])
 		return result, false, blockCmd
 
+	case "presence":
+		result, presenceCmd := m.presenceCommand(fields[1:])
+		return result, false, presenceCmd
+
 	case "post":
 		cat := ""
 		if len(fields) > 1 {
@@ -1553,6 +1632,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return fmt.Sprintf("Already logged in as %s.", m.username), false, nil
 		}
 		return "Logging in...", false, loginCmd(m.apiClient, m.identity, m.username)
+
+	case "delete-account":
+		result, deleteCmd := m.deleteAccountCommand(fields[1:])
+		return result, false, deleteCmd
 
 	case "logout":
 		if m.accessToken == "" {
@@ -1619,6 +1702,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return fmt.Sprintf("Startup checklist set to %s, but couldn't save it: %v", value, err), false, nil
 		}
 		return fmt.Sprintf("Startup checklist %s - effective from the next launch.", value), false, nil
+
+	case "synapse":
+		result, roomCmd := m.roomCommand(fields[1:])
+		return result, false, roomCmd
 
 	case "quit", "q":
 		return "", true, nil
@@ -1851,6 +1938,14 @@ func (m Model) renderHeader() string {
 	if width <= 0 {
 		width = 80
 	}
+	// The round-trip time rides next to "online" when there is room
+	// for it; on a narrow terminal the tabs keep their space.
+	if lat := m.latencyLabel(); lat != "" {
+		withLat := status + m.theme.Muted.Render(" · "+lat)
+		if width-lipgloss.Width(tabs)-lipgloss.Width(withLat) >= 1 {
+			status = withLat
+		}
+	}
 
 	gap := width - lipgloss.Width(tabs) - lipgloss.Width(status)
 	if gap < 1 {
@@ -1961,6 +2056,9 @@ func (m Model) composeHint() string {
 // now. It takes a pre-computed blockReason so renderChatThread can call
 // keyBlockReason once and pass it to both chatStatusLines and here.
 func (m Model) composeHintFor(blockReason string) string {
+	if id, ok := roomIDOf(m.chatActive); ok {
+		return m.roomHint(id)
+	}
 	if blockReason != "" {
 		return fmt.Sprintf("enter won't send - :accept %s to trust their new key · ctrl+p commands · esc back to list",
 			m.chatContactLabel(m.chatActive))
@@ -2133,6 +2231,9 @@ func (m Model) recipientUserID(contact chat.ContactKey) (string, bool) {
 // chat.ContactKey itself doesn't depend on a username ever having been
 // known, so this stays correct even if that changes later).
 func (m Model) chatContactLabel(contact chat.ContactKey) string {
+	if id, ok := roomIDOf(contact); ok {
+		return m.roomLabel(id)
+	}
 	if info, ok := m.chatContacts[contact]; ok && info.Username != "" {
 		return info.Username
 	}

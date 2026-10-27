@@ -196,3 +196,117 @@ func TestStoreSliceReturnsACopy(t *testing.T) {
 		t.Errorf("mutating a Slice result changed the store: %q", again[0].Body)
 	}
 }
+
+func bodies(s *Store, c ContactKey) []string {
+	var out []string
+	for _, m := range s.Messages(c) {
+		out = append(out, string(m.Body))
+	}
+	return out
+}
+
+func eq(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestAppendOrderedPlacesMessagesBySequenceNumber(t *testing.T) {
+	s := NewStore()
+	c := ContactKey("room:1")
+	s.AppendOrdered(c, Message{Body: []byte("three"), Seq: 3})
+	s.AppendOrdered(c, Message{Body: []byte("one"), Seq: 1})
+	s.AppendOrdered(c, Message{Body: []byte("two"), Seq: 2})
+	s.AppendOrdered(c, Message{Body: []byte("four"), Seq: 4})
+	if got := bodies(s, c); !eq(got, []string{"one", "two", "three", "four"}) {
+		t.Fatalf("order = %v", got)
+	}
+}
+
+func TestUnacknowledgedOwnMessagesStayAtTheEnd(t *testing.T) {
+	s := NewStore()
+	c := ContactKey("room:1")
+	s.AppendOrdered(c, Message{Body: []byte("a"), Seq: 1})
+	s.AppendOrdered(c, Message{Body: []byte("mine"), ID: "m1", Outgoing: true}) // no seq yet
+	s.AppendOrdered(c, Message{Body: []byte("b"), Seq: 3})                      // arrives before my ack
+	if got := bodies(s, c); !eq(got, []string{"a", "b", "mine"}) {
+		t.Fatalf("before ack = %v", got)
+	}
+	// The ack says mine was number 2: it moves between a and b.
+	if !s.SetSeq(c, "m1", 2) {
+		t.Fatal("SetSeq did not find the message")
+	}
+	if got := bodies(s, c); !eq(got, []string{"a", "mine", "b"}) {
+		t.Fatalf("after ack = %v", got)
+	}
+	m, _ := s.FindByID(c, "m1")
+	if m.Seq != 2 {
+		t.Fatalf("seq = %d", m.Seq)
+	}
+}
+
+func TestSystemLinesDoNotGetHoppedOver(t *testing.T) {
+	s := NewStore()
+	c := ContactKey("room:1")
+	s.Append(c, Message{Body: []byte("you joined"), System: true})
+	s.AppendOrdered(c, Message{Body: []byte("first"), Seq: 1})
+	if got := bodies(s, c); !eq(got, []string{"you joined", "first"}) {
+		t.Fatalf("order = %v", got)
+	}
+}
+
+func TestSetSeqOnAnUnknownMessageIsReported(t *testing.T) {
+	s := NewStore()
+	c := ContactKey("room:1")
+	s.AppendOrdered(c, Message{Body: []byte("x"), ID: "m1"})
+	if s.SetSeq(c, "nope", 5) || s.SetSeq(c, "", 5) || s.SetSeq("other", "m1", 5) {
+		t.Fatal("SetSeq reported success for a message that is not there")
+	}
+}
+
+func TestFindByIDReturnsACopy(t *testing.T) {
+	s := NewStore()
+	c := ContactKey("room:1")
+	s.AppendOrdered(c, Message{Body: []byte("hello"), ID: "m1", Seq: 1})
+	m, ok := s.FindByID(c, "m1")
+	if !ok {
+		t.Fatal("not found")
+	}
+	m.Body[0] = 'X'
+	if again, _ := s.FindByID(c, "m1"); string(again.Body) != "hello" {
+		t.Fatal("FindByID shares memory with the store")
+	}
+	if _, ok := s.FindByID(c, "zzz"); ok {
+		t.Fatal("found a message that is not there")
+	}
+}
+
+func TestDeleteRemovesOnlyThatThreadAndZeroesIt(t *testing.T) {
+	s := NewStore()
+	room, other := ContactKey("room:1"), ContactKey("aa")
+	s.Append(other, Message{Body: []byte("keep")})
+	s.Append(room, Message{Body: []byte("secret")})
+	s.Append(ContactKey("bb"), Message{Body: []byte("also keep")})
+
+	// Hold the backing array to see that Delete zeroed it.
+	backing := s.threads[room][0].Body
+
+	s.Delete(room)
+	if s.HasThread(room) || s.Len(room) != 0 {
+		t.Fatal("thread survived Delete")
+	}
+	if !bytes.Equal(backing, make([]byte, len(backing))) {
+		t.Fatalf("bytes not zeroed: %q", backing)
+	}
+	threads := s.Threads()
+	if len(threads) != 2 || threads[0] != other || threads[1] != "bb" {
+		t.Fatalf("threads = %v", threads)
+	}
+	s.Delete(room) // deleting twice is harmless
+}

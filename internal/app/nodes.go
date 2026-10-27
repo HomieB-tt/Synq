@@ -85,6 +85,7 @@ func (l nodeLists) find(list []nodeRow, username string) (nodeRow, bool) {
 
 type nodesLoadedMsg struct {
 	nodes        []api.NodeRelationship
+	presence     *api.Presence // nil when it could not be fetched; the list still loads
 	err          error
 	unauthorized bool
 }
@@ -100,7 +101,15 @@ func (m Model) fetchNodesCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
 		defer cancel()
 		nodes, err := client.ListNodes(ctx, token)
-		return nodesLoadedMsg{nodes: nodes, err: err, unauthorized: api.IsUnauthorized(err)}
+		out := nodesLoadedMsg{nodes: nodes, err: err, unauthorized: api.IsUnauthorized(err)}
+		if err == nil {
+			// Best effort: a server without presence, or a blip, only
+			// costs the dots, never the list.
+			if p, perr := client.GetPresence(ctx, token); perr == nil {
+				out.presence = &p
+			}
+		}
+		return out
 	}
 }
 
@@ -116,6 +125,9 @@ func (m Model) handleNodesLoaded(msg nodesLoadedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.nodes = msg.nodes
+	if msg.presence != nil {
+		m.applyPresence(*msg.presence)
+	}
 	m.nodesLoaded = true
 	m.nodesErr = ""
 	return m, nil
@@ -488,20 +500,29 @@ func (m Model) nodeRowLine(e nodeEntry, selected bool, w int) string {
 	// order, only as far as needed to leave the name a readable width.
 	const minName = 8
 	verified, handle := e.Verified, e.Handle
+	dot, dotStyle := "", base
+	if e.kind == nodeActive && m.presenceVisible() {
+		if m.online[e.UserID] {
+			dot, dotStyle = "● ", lipgloss.NewStyle().Foreground(m.theme.Success).Background(bg)
+		} else {
+			dot, dotStyle = "○ ", muted
+		}
+	}
 	room := func() int {
-		return w - lipgloss.Width(marker) - badgeWidth(verified, handle) - lipgloss.Width(status) - 2
+		return w - lipgloss.Width(marker) - lipgloss.Width(dot) - badgeWidth(verified, handle) - lipgloss.Width(status) - 2
 	}
 	if status != "" && room() < minName {
 		status = ""
 	}
-	if verified && w-lipgloss.Width(marker)-badgeWidth(verified, handle) < minName {
+	if verified && w-lipgloss.Width(marker)-lipgloss.Width(dot)-badgeWidth(verified, handle) < minName {
 		verified, handle = false, ""
 	}
 	badge := badgeWidth(verified, handle)
 	name := truncateToWidth(sanitizeForTerminal(e.Username), max(room(), 1))
-	used := lipgloss.Width(marker) + lipgloss.Width(name) + badge
+	used := lipgloss.Width(marker) + lipgloss.Width(dot) + lipgloss.Width(name) + badge
 
 	return markerStyle.Render(marker) +
+		dotStyle.Render(dot) +
 		base.Bold(true).Render(name) +
 		m.badgeSpans(verified, handle, base, muted, bg) +
 		base.Render(strings.Repeat(" ", max(w-used-lipgloss.Width(status), 1))) +

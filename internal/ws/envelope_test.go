@@ -175,3 +175,123 @@ func TestDecodeFrameErrorsAreWrapped(t *testing.T) {
 		t.Errorf("error %q does not start with the package prefix", err)
 	}
 }
+
+func TestRoomFramesDecode(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame string
+		check func(Event) bool
+	}{
+		{"message", `{"type":"room_message","room":"r1","seq":7,"from":"u1","payload":"AAE="}`,
+			func(e Event) bool {
+				return e.Room == "r1" && e.Seq == 7 && e.From == "u1" && bytes.Equal(e.Payload, []byte{0, 1})
+			}},
+		{"ack", `{"type":"room_ack","room":"r1","cid":"abc","seq":3}`,
+			func(e Event) bool { return e.Room == "r1" && e.Cid == "abc" && e.Seq == 3 }},
+		{"invite", `{"type":"room_invite","room":"r1","name":"standup","from":"u9"}`,
+			func(e Event) bool { return e.Room == "r1" && e.Name == "standup" && e.From == "u9" }},
+		{"joined", `{"type":"room_joined","room":"r1","user":"u2"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomJoined && e.User == "u2" }},
+		{"left", `{"type":"room_left","room":"r1","user":"u2"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomLeft && e.User == "u2" }},
+		{"direct", `{"type":"room_direct","room":"r1","from":"u1","payload":"AAE="}`,
+			func(e Event) bool {
+				return e.Type == EventTypeRoomDirect && e.Room == "r1" && e.From == "u1" && bytes.Equal(e.Payload, []byte{0, 1})
+			}},
+		{"offer", `{"type":"room_transfer_offer","room":"r1","from":"u1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomTransferOffer && e.Room == "r1" && e.From == "u1" }},
+		{"cancelled", `{"type":"room_transfer_cancelled","room":"r1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomTransferCancelled && e.Room == "r1" }},
+		{"owner changed", `{"type":"room_owner_changed","room":"r1","owner":"u2","from":"u1"}`,
+			func(e Event) bool { return e.Type == EventTypeRoomOwnerChanged && e.Owner == "u2" && e.From == "u1" }},
+		{"ended", `{"type":"room_ended","room":"r1","reason":"owner_gone"}`,
+			func(e Event) bool { return e.Room == "r1" && e.Reason == "owner_gone" }},
+	}
+	for _, c := range cases {
+		e, err := DecodeFrame([]byte(c.frame))
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !c.check(e) {
+			t.Errorf("%s: decoded %+v", c.name, e)
+		}
+	}
+}
+
+func TestMalformedRoomFramesAreErrors(t *testing.T) {
+	for _, frame := range []string{
+		`{"type":"room_message","seq":1,"from":"u","payload":"AA=="}`,
+		`{"type":"room_message","room":"r","from":"u","payload":"AA=="}`,
+		`{"type":"room_message","room":"r","seq":1,"from":"u"}`,
+		`{"type":"room_message","room":"r","seq":1,"from":"u","payload":"!!"}`,
+		`{"type":"room_ack","room":"r","seq":1}`,
+		`{"type":"room_invite","room":"r"}`,
+		`{"type":"room_direct","from":"u","payload":"AA=="}`,
+		`{"type":"room_direct","room":"r","from":"u"}`,
+		`{"type":"room_transfer_offer","room":"r"}`,
+		`{"type":"room_transfer_cancelled"}`,
+		`{"type":"room_owner_changed","room":"r"}`,
+		`{"type":"room_joined","room":"r"}`,
+		`{"type":"room_ended"}`,
+	} {
+		if _, err := DecodeFrame([]byte(frame)); err == nil {
+			t.Errorf("accepted %s", frame)
+		}
+	}
+}
+
+func TestEncodeRoomSendShape(t *testing.T) {
+	frame, err := EncodeRoomSend("r1", "cid1", []byte{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(frame, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if len(shape) != 3 || shape["room"] != "r1" || shape["cid"] != "cid1" || shape["payload"] != "AQI=" {
+		t.Fatalf("shape = %v", shape)
+	}
+	if _, has := shape["to"]; has {
+		t.Fatal("a room frame must not carry `to`")
+	}
+	if _, err := EncodeRoomSend("", "c", nil); err == nil {
+		t.Error("empty room accepted")
+	}
+	if _, err := EncodeRoomSend("r", "", nil); err == nil {
+		t.Error("empty cid accepted")
+	}
+}
+
+func TestEncodeRoomDirect(t *testing.T) {
+	b, err := EncodeRoomDirect("r1", "u2", []byte{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"to":"u2","room":"r1","payload":"AAE="}` {
+		t.Fatalf("frame = %s", b)
+	}
+	if _, err := EncodeRoomDirect("", "u2", nil); err == nil {
+		t.Fatal("empty room accepted")
+	}
+	if _, err := EncodeRoomDirect("r1", "", nil); err == nil {
+		t.Fatal("empty recipient accepted")
+	}
+}
+
+func TestDecodeNodePresence(t *testing.T) {
+	for _, online := range []bool{true, false} {
+		frame := `{"type":"node_presence","user":"usr_a","online":` + map[bool]string{true: "true", false: "false"}[online] + `}`
+		got, err := DecodeFrame([]byte(frame))
+		if err != nil {
+			t.Fatalf("DecodeFrame: %v", err)
+		}
+		if got.Type != EventTypePresence || got.User != "usr_a" || got.Online != online || got.Payload != nil {
+			t.Errorf("got %+v, want presence for usr_a online=%v", got, online)
+		}
+	}
+	if _, err := DecodeFrame([]byte(`{"type":"node_presence","online":true}`)); err == nil {
+		t.Error("a presence frame with no user decoded")
+	}
+}

@@ -67,6 +67,9 @@ func (s fileState) label() string {
 // fileEntry is one offer received from a contact. The key never leaves
 // this struct (and so this process): it is what opens the download.
 type fileEntry struct {
+	// roomID is set for a file shared in a room; contact is then the
+	// room's thread. Room files have no server session or claim.
+	roomID  string
 	contact chat.ContactKey
 	from    string
 	offer   *transfer.Offer
@@ -234,6 +237,8 @@ func (m *Model) sendFileCmd(path string) (string, tea.Cmd) {
 	switch {
 	case m.activeTab != tabChat || m.chatActive == "":
 		return "Open a chat first (:chat <username>), then :send <path>.", nil
+	case isRoomThread(m.chatActive):
+		return m.sendRoomFileCmd(path)
 	case m.apiClient == nil || m.accessToken == "":
 		return "Sending files needs you to be logged in to synq-server.", nil
 	case m.fileSession == "":
@@ -355,7 +360,7 @@ func (m *Model) downloadCmd(e *fileEntry) tea.Cmd {
 		e.note = "Log in to synq-server to download."
 		return nil
 	}
-	if m.fileSession == "" {
+	if m.fileSession == "" && e.roomID == "" {
 		e.note = "The transfer session isn't up yet - try again in a moment."
 		return nil
 	}
@@ -370,6 +375,15 @@ func (m *Model) downloadCmd(e *fileEntry) tea.Cmd {
 	client, token, session := m.apiClient, m.accessToken, m.fileSession
 	offer, key := e.offer, e.key
 	tr, tick := m.beginTransfer(offer.AttachmentID, offer.Name, false)
+	if roomID := e.roomID; roomID != "" {
+		return tea.Batch(tick, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), fileTransferTimeout)
+			defer cancel()
+			ctx = transfer.WithProgress(ctx, tr.prog)
+			path, err := transfer.ReceiveRoomFile(ctx, client, token, roomID, offer, key, cache)
+			return fileReceiveResultMsg{id: offer.AttachmentID, path: path, err: err, unauthorized: api.IsUnauthorized(err), tr: tr}
+		})
+	}
 	return tea.Batch(tick, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), fileTransferTimeout)
 		defer cancel()
@@ -399,6 +413,8 @@ func (m Model) handleFileReceiveResult(msg fileReceiveResultMsg) (tea.Model, tea
 			return m, m.maybeReauthCmd()
 		case api.IsConflict(msg.err):
 			e.note = "Not available yet (the sender may still be uploading) or already fetched."
+		case api.IsNotFound(msg.err) && e.roomID != "":
+			e.note = "That file is gone - the " + roomNoun + " has ended, or you're no longer in it."
 		case api.IsNotFound(msg.err):
 			e.note = "The sender is gone or the file expired - ask them to send it again."
 		default:
@@ -450,7 +466,7 @@ func (m *Model) viewCmd(e *fileEntry) tea.Cmd {
 	if open == nil {
 		open = transfer.OpenDefault
 	}
-	path, id := e.path, e.offer.AttachmentID
+	path, id, inRoom := e.path, e.offer.AttachmentID, e.roomID != ""
 	client, token, session := m.apiClient, m.accessToken, m.fileSession
 	e.note = "Opening in your default application…"
 	return func() tea.Msg {
@@ -458,8 +474,8 @@ func (m *Model) viewCmd(e *fileEntry) tea.Cmd {
 			return fileViewResultMsg{id: id, err: err}
 		}
 		// Best effort: tell the server it was viewed. A failure here
-		// changes nothing for the user.
-		if client != nil && token != "" && session != "" {
+		// changes nothing for the user. (Room files have no such record.)
+		if client != nil && token != "" && session != "" && !inRoom {
 			ctx, cancel := context.WithTimeout(context.Background(), apiHTTPTimeout)
 			defer cancel()
 			_ = client.MarkOpened(ctx, token, id, session)
@@ -517,7 +533,7 @@ func (m *Model) ignoreCmd(e *fileEntry) tea.Cmd {
 	if m.fileCache != nil {
 		_ = m.fileCache.Remove(e.offer.AttachmentID)
 	}
-	if !wasReady || m.apiClient == nil || m.accessToken == "" || m.fileSession == "" {
+	if !wasReady || e.roomID != "" || m.apiClient == nil || m.accessToken == "" || m.fileSession == "" {
 		return nil
 	}
 	client, token, session, id := m.apiClient, m.accessToken, m.fileSession, e.offer.AttachmentID

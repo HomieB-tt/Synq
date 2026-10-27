@@ -44,6 +44,54 @@ type Sent struct {
 // The ciphertext is written to disk first because the offer must commit
 // to its size and hash before the upload starts.
 func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, path, scratch string) (*Sent, error) {
+	p, err := encryptForUpload(ctx, path, scratch)
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+
+	prog := progressFrom(ctx)
+	offer, err := srv.OfferAttachment(ctx, token, api.OfferRequest{
+		RecipientID:      recipientID,
+		SessionID:        sessionID,
+		BlobSize:         p.blobSize,
+		CiphertextSHA256: p.hash,
+		Encryption:       api.EncryptionMetadata{Algorithm: "AES-256-GCM-chunked", Chunk: filecrypt.ChunkSize},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("offer: %w", err)
+	}
+	prog.Start(PhaseUploading, p.blobSize)
+	if err := srv.UploadAttachment(ctx, token, offer.AttachmentID, prog.reader(p.tmp), p.blobSize); err != nil {
+		return nil, fmt.Errorf("upload: %w", err)
+	}
+	return &Sent{
+		AttachmentID: offer.AttachmentID,
+		Name:         SafeName(filepath.Base(path)),
+		Size:         p.plainSize,
+		Hash:         p.hash,
+		Key:          p.key,
+	}, nil
+}
+
+// prepared is a file encrypted into a scratch file, ready to upload.
+type prepared struct {
+	tmp       *os.File // positioned at the start
+	plainSize int64
+	blobSize  int64
+	hash      string
+	key       *[filecrypt.KeySize]byte
+}
+
+func (p *prepared) close() {
+	p.tmp.Close()
+	os.Remove(p.tmp.Name())
+}
+
+// encryptForUpload seals the file at path under a fresh key into a
+// temporary file in scratch. The ciphertext is written to disk first
+// because the server needs its size and hash before the upload starts.
+func encryptForUpload(ctx context.Context, path, scratch string) (*prepared, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -72,9 +120,12 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 	if err != nil {
 		return nil, err
 	}
+	p := &prepared{tmp: tmp, key: key}
+	ok := false
 	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		if !ok {
+			p.close()
+		}
 	}()
 
 	prog.Start(PhaseEncrypting, st.Size())
@@ -86,32 +137,13 @@ func SendFile(ctx context.Context, srv Server, token, sessionID, recipientID, pa
 		// The file grew between the stat and the read.
 		return nil, errors.New("file changed size while it was being read")
 	}
-	blobSize := filecrypt.CiphertextSize(plainSize)
+	p.plainSize, p.hash = plainSize, hash
+	p.blobSize = filecrypt.CiphertextSize(plainSize)
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-
-	offer, err := srv.OfferAttachment(ctx, token, api.OfferRequest{
-		RecipientID:      recipientID,
-		SessionID:        sessionID,
-		BlobSize:         blobSize,
-		CiphertextSHA256: hash,
-		Encryption:       api.EncryptionMetadata{Algorithm: "AES-256-GCM-chunked", Chunk: filecrypt.ChunkSize},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("offer: %w", err)
-	}
-	prog.Start(PhaseUploading, blobSize)
-	if err := srv.UploadAttachment(ctx, token, offer.AttachmentID, prog.reader(tmp), blobSize); err != nil {
-		return nil, fmt.Errorf("upload: %w", err)
-	}
-	return &Sent{
-		AttachmentID: offer.AttachmentID,
-		Name:         SafeName(filepath.Base(path)),
-		Size:         plainSize,
-		Hash:         hash,
-		Key:          key,
-	}, nil
+	ok = true
+	return p, nil
 }
 
 // ReceiveFile claims and downloads an offered attachment, checks it
@@ -167,71 +199,8 @@ func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer
 	}
 	defer body.Close()
 
-	ctPath := filepath.Join(dir, "download.part")
-	ct, err := os.OpenFile(ctPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	final, n, got, err := materialize(prog, dir, body, offer, key)
 	if err != nil {
-		cancel()
-		return "", err
-	}
-	defer os.Remove(ctPath)
-	defer ct.Close()
-
-	// Read one byte past the expected size so an over-long stream is
-	// noticed instead of silently cut.
-	prog.Start(PhaseDownloading, want)
-	n, err := io.Copy(ct, io.LimitReader(prog.reader(body), want+1))
-	if err != nil {
-		cancel()
-		return "", fmt.Errorf("download: %w", err)
-	}
-	if n != want {
-		cancel()
-		return "", fmt.Errorf("download was %d bytes, expected %d", n, want)
-	}
-	if _, err := ct.Seek(0, io.SeekStart); err != nil {
-		cancel()
-		return "", err
-	}
-	prog.Start(PhaseVerifying, 0)
-	got, err := filecrypt.HashOf(ct)
-	if err != nil {
-		cancel()
-		return "", err
-	}
-	if !filecrypt.EqualHash(got, offer.CiphertextSHA256) {
-		cancel()
-		return "", errors.New("the download doesn't match the hash the sender committed to")
-	}
-
-	if _, err := ct.Seek(0, io.SeekStart); err != nil {
-		cancel()
-		return "", err
-	}
-	plainPath := filepath.Join(dir, "plain.part")
-	plain, err := os.OpenFile(plainPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		cancel()
-		return "", err
-	}
-	prog.Start(PhaseDecrypting, want)
-	written, err := filecrypt.Decrypt(plain, prog.reader(ct), key)
-	if cerr := plain.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		cancel()
-		if errors.Is(err, filecrypt.ErrCorrupt) {
-			return "", errors.New("the file failed authentication - it was corrupted or tampered with")
-		}
-		return "", fmt.Errorf("decrypt: %w", err)
-	}
-	if written != offer.Size {
-		cancel()
-		return "", fmt.Errorf("the file decrypted to %d bytes, but the offer said %d", written, offer.Size)
-	}
-
-	final := filepath.Join(dir, offer.Name)
-	if err := os.Rename(plainPath, final); err != nil {
 		cancel()
 		return "", err
 	}
@@ -240,4 +209,74 @@ func ReceiveFile(ctx context.Context, srv Server, token, sessionID string, offer
 	}
 	ok = true
 	return final, nil
+}
+
+// materialize reads the ciphertext of offer from body (exactly the size
+// the offer implies), checks it against the hash the sender committed to,
+// decrypts it, and leaves the plaintext at dir/offer.Name - only after
+// every check passed. It returns that path, the ciphertext length and its
+// hash. Shared by 1:1 and room downloads.
+func materialize(prog *Progress, dir string, body io.Reader, offer *Offer, key *[filecrypt.KeySize]byte) (final string, n int64, hash string, err error) {
+	want := filecrypt.CiphertextSize(offer.Size)
+	ctPath := filepath.Join(dir, "download.part")
+	ct, err := os.OpenFile(ctPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", 0, "", err
+	}
+	defer os.Remove(ctPath)
+	defer ct.Close()
+
+	// Read one byte past the expected size so an over-long stream is
+	// noticed instead of silently cut.
+	prog.Start(PhaseDownloading, want)
+	n, err = io.Copy(ct, io.LimitReader(prog.reader(body), want+1))
+	if err != nil {
+		return "", 0, "", fmt.Errorf("download: %w", err)
+	}
+	if n != want {
+		return "", 0, "", fmt.Errorf("download was %d bytes, expected %d", n, want)
+	}
+	if _, err := ct.Seek(0, io.SeekStart); err != nil {
+		return "", 0, "", err
+	}
+	prog.Start(PhaseVerifying, 0)
+	got, err := filecrypt.HashOf(ct)
+	if err != nil {
+		return "", 0, "", err
+	}
+	if !filecrypt.EqualHash(got, offer.CiphertextSHA256) {
+		return "", 0, "", errors.New("the download doesn't match the hash the sender committed to")
+	}
+
+	if _, err := ct.Seek(0, io.SeekStart); err != nil {
+		return "", 0, "", err
+	}
+	plainPath := filepath.Join(dir, "plain.part")
+	plain, err := os.OpenFile(plainPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", 0, "", err
+	}
+	prog.Start(PhaseDecrypting, want)
+	written, err := filecrypt.Decrypt(plain, prog.reader(ct), key)
+	if cerr := plain.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(plainPath)
+		if errors.Is(err, filecrypt.ErrCorrupt) {
+			return "", 0, "", errors.New("the file failed authentication - it was corrupted or tampered with")
+		}
+		return "", 0, "", fmt.Errorf("decrypt: %w", err)
+	}
+	if written != offer.Size {
+		os.Remove(plainPath)
+		return "", 0, "", fmt.Errorf("the file decrypted to %d bytes, but the offer said %d", written, offer.Size)
+	}
+
+	final = filepath.Join(dir, offer.Name)
+	if err := os.Rename(plainPath, final); err != nil {
+		os.Remove(plainPath)
+		return "", 0, "", err
+	}
+	return final, n, got, nil
 }

@@ -95,7 +95,7 @@ Synq is built for developers who live in the terminal/CLI. Every interaction ( n
 - Private messages are encrypted client-side, per recipient, before being sent over the WebSocket connection. The server only ever handles ciphertext.
 - There is no server-side plaintext, no server-side decryption capability, and no message persistence beyond the sender and recipient's own local caches.
 - **There is no passphrase recovery** (`DESIGN.md` section 1): the passphrase is the only thing that can open the vault, and it is never stored anywhere - forgotten passphrase means forgotten identity, by design.
-- **Starting over after a forgotten passphrase:** quit and run `synq --forget`. It *renames* the key store beside itself (e.g. `~/.config/synq/synq.db.bak-20261007-150405`) - it is never deleted - and the next launch opens the first-run menu as if the device were new. The archive still holds the old identity plus your local preferences (theme, key pins, GitHub handle); delete it yourself whenever you decide you no longer need it. Synq prints this hint after two failed passphrase attempts, so the escape hatch is discoverable from the prompt that would otherwise loop forever.
+- **Starting over after a forgotten passphrase:** quit and run `synq --forget`. It *renames* the key store beside itself (e.g. `~/.config/synq/synq.db.bak-20261007-150405`) - it is never deleted - and the next launch opens the first-run menu as if the device were new. The archive still holds the old identity plus your local preferences (theme, key pins, GitHub handle); delete it yourself whenever you decide you no longer need it. If that identity had a registered username, `--forget` says so: the name stays claimed on the server (you can no longer delete the account without the old passphrase) until it is cleaned up for being unused, so run `:delete-account` first if you still can. Synq prints this hint after two failed passphrase attempts, so the escape hatch is discoverable from the prompt that would otherwise loop forever.
 
 ## Tech stack
 
@@ -143,6 +143,7 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | --- | --- |
 | `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |
+| `:delete-account <username> confirm` | Delete your account on the server for good: nodes, posts, files and synapses you own go with it, and the name is freed. Your keys stay on this device, so `:register` can claim a name again. |
 | `:name <your name>` | Set a local display name, shown in your own Profile tab. Purely a local, free-form, trivially-changeable label - not the same thing as the permanent `:register`ed username below (see `DESIGN.md`'s note on `PrefUsername`/`PrefDisplayName` for why those are never interchangeable). |
 | `:name clear` | Clear your local display name. |
 | `:verify <username>` | Compare your identity's fingerprint against the key pinned for that username (`DESIGN.md` section 2), for out-of-band verification. If a key change is pending, it compares against the **new**, not-yet-accepted key - the one you're about to trust. Requires having looked the username up at least once (`:chat` them first). |
@@ -153,6 +154,7 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | `:node <username>` | Send a node request to someone by their exact username (there's no user search - they have to tell you). Once they accept, you can `:chat` and `:send` to each other. |
 | `:nodes` | Open the Nodes tab and refresh it. Also `r` while on that tab. Shows requests waiting for you, your active nodes, and requests you've sent. |
 | `:accept <username>` | Accept a node request from that user. (The same command also trusts a contact's changed key - see below.) |
+| `:presence [on\|off]` | Show or hide your online status. Connected nodes show a dot on the Nodes tab (`●` online, `○` offline) and a message appears when one comes online. On by default; `off` hides you from them and them from you. |
 | `:block <username> confirm` | Block a user. Silent - they aren't told - and there's no undo from the client. Blocked users never appear in the list. |
 | `:send <path>` | Send a file (up to 100 MB) to the contact in the open chat - use `Ctrl+P` to reach the command palette from inside a thread. Only works between active nodes. The file is encrypted on your machine; synq-server never sees its contents, name or key. It stays available while you remain connected. |
 | `:files` | List files contacts have offered you. `Enter` downloads one and checks it; `v` opens it in your default application; `s` saves it to your save folder; `i` ignores it. Anything not saved is deleted when you quit. |
@@ -161,12 +163,13 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 | `:login` | Manually re-authenticate after `:logout`, without restarting Synq. You won't normally need this - a registered identity logs in automatically and silently on every launch (see Configuration below). |
 | `:logout` | Revoke all of this account's sessions and disconnect. |
 | `:chat <username>` | Open an existing thread with a contact, or start a new one, looked up by their registered username. Messages go out end-to-end encrypted: a per-launch ephemeral handshake derives a session key (`DESIGN.md` sections 2-3), and the relay only ever sees ciphertext. The first lookup also pins their public key - a later change blocks sends until `:accept`. Chat history is session-only (see `DESIGN.md` section 4). Requires being logged in. |
+| `:synapse <new\|invite\|accept\|decline\|leave\|kick\|transfer\|end\|members\|connect\|list> ...` | Synapses: small, invite-only group chats of up to 16 people that vanish when they end. `:synapse new <name>` makes one and you own it; `:synapse invite <username>` invites someone you have an active node with; they join with `:synapse accept <name>`. A synapse is a thread in the Chat tab (marked `#`); `Ctrl+R` there steps through messages to reply to. Messages are end-to-end encrypted and signed, so the server can't read them and one member can't write as another (`DESIGN.md` section 12). `:send <path>` shares a file with everyone in it (up to 100 MB; 20 files and 300 MB per synapse); members get it in `:files` to view or save, and anything not saved is wiped, here and on the server, when the synapse ends. The owner can remove someone (`:synapse kick <username>`; the key is changed so they read nothing new) or hand the synapse to a joined member (`:synapse transfer <username>`; they `:synapse accept` or `:synapse decline`), after which quitting no longer ends it for the old owner. A synapse lasts only while its owner is here: `:synapse end confirm`, quitting Synq (you are asked first), or the owner going offline for about 90 seconds ends it for everyone and wipes it. |
 | `:github` | Link your GitHub account via OAuth Device Flow (see Configuration below). Optional - grants a verification badge only, unrelated to Synq's own identity/auth. |
 | `:commands` | Open the command list - every command, grouped, with an explanation of what it does. `↑`/`↓` select, `Enter` runs it (commands that need an argument open a prompt for it), `Esc` closes. On the Profile tab, press `c`. |
 | `:welcome` | Show the getting-started guide again. It is shown once, on first launch. |
 | `:help` | Same as pressing `?` - the full key/command reference. |
 | `:server [address\|reset]` | Show or change the synq-server Synq connects to. Takes effect after a restart. |
-| `:ping` | Time a few requests to the server (first one includes connection setup) to tell a slow server from a slow link. |
+| `:ping` | Time a few requests to the server (first one includes connection setup) to tell a slow server from a slow link. The header also shows the latest round trip beside `● online` (e.g. `● online · 158 ms`), refreshed every 30 s while logged in, when it fits. |
 | `:boot on\|off` | Show (or stop showing) the startup checklist on the next launch. On by default; the splash itself is always skippable with any key. |
 | `:quit` | Same as pressing `q`. |
 
@@ -179,6 +182,8 @@ Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `
 **Maintainers:** set the `SYNQ_DEFAULT_SERVER_URL` repository variable before tagging a release; GoReleaser links it into the binary (`-X main.defaultServerURL=...`). Local builds: `go build -ldflags "-X main.defaultServerURL=https://..." ./cmd/synq`.
 
 **`SYNQ_ALLOW_INSECURE_HTTP`** - Synq refuses to start with a cleartext `http://` `SYNQ_SERVER_URL` unless the host is loopback (`localhost`, `127.0.0.1`, `::1`), because tokens would cross the network unencrypted. Set this to `1` to override on a network you trust, such as a home LAN.
+
+**`SYNQ_NO_ANIMATION`** - set to `1` to show the first-run screen without its small animations.
 
 **`SYNQ_GITHUB_CLIENT_ID`** - required only if you want to use `:github`. GitHub verification is off by default; without this set, `:github` just tells you it isn't configured rather than failing partway through.
 

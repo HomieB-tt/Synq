@@ -30,8 +30,8 @@ func runCommandNames(t *testing.T) []string {
 		body = body[:end]
 	}
 	var names []string
-	for _, m := range regexp.MustCompile(`(?m)^\tcase ((?:"[a-z]+"(?:, )?)+):`).FindAllStringSubmatch(body, -1) {
-		for _, q := range regexp.MustCompile(`"([a-z]+)"`).FindAllStringSubmatch(m[1], -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\tcase ((?:"[a-z-]+"(?:, )?)+):`).FindAllStringSubmatch(body, -1) {
+		for _, q := range regexp.MustCompile(`"([a-z-]+)"`).FindAllStringSubmatch(m[1], -1) {
 			names = append(names, q[1])
 		}
 	}

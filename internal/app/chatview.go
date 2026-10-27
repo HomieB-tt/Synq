@@ -244,6 +244,8 @@ func (m Model) chatListRow(contact chat.ContactKey, selected bool, w int) string
 		text := sanitizeForTerminal(string(last.Body))
 		if last.Outgoing {
 			text = "you: " + text
+		} else if last.Author != "" {
+			text = last.Author + ": " + text
 		}
 		preview = truncateToWidth(text, avail)
 	}
@@ -360,6 +362,9 @@ func (m Model) chatHeader(w int, hasAbove bool) string {
 // the reassurance this screen exists to give.
 func (m Model) chatStatusLines(w int, blockReason string) []string {
 	t := m.theme
+	if id, ok := roomIDOf(m.chatActive); ok {
+		return m.roomStatusLines(id, w)
+	}
 	if blockReason != "" {
 		lines := wrapToWidth("⚠ "+blockReason, w)
 		if len(lines) > chatMaxStatusLines {
@@ -567,17 +572,39 @@ func (m Model) chatMessageLines(prev *chat.Message, msg chat.Message, w int) []s
 	bar := t.Text.Foreground(barColor).Render(chatBar)
 	sp := t.Text.Render(" ")
 
-	var lines []string
-	groupStart := prev == nil || prev.Outgoing != msg.Outgoing || msg.At.Sub(prev.At) > chatGroupGap
-	if groupStart {
+	if msg.System {
+		// A line the app wrote ("alice joined"): muted, no sender.
+		var sys []string
 		if prev != nil {
+			sys = append(sys, "")
+		}
+		for _, l := range wrapToWidth(sanitizeForTerminal(string(msg.Body)), max(w-2, 1)) {
+			sys = append(sys, t.Muted.Render("· "+l))
+		}
+		return sys
+	}
+
+	var lines []string
+	groupStart := prev == nil || prev.System || prev.Outgoing != msg.Outgoing || prev.Author != msg.Author || msg.At.Sub(prev.At) > chatGroupGap
+	if msg.Quote != "" {
+		groupStart = true // a reply always gets its own header and quote
+	}
+	if groupStart {
+		if prev != nil && !prev.System {
 			lines = append(lines, "")
 		}
-		name := t.Text.Bold(true).Render(truncateToWidth(m.chatContactLabel(m.chatActive), max(w-10, 8)))
+		who := m.chatContactLabel(m.chatActive)
+		if msg.Author != "" {
+			who = sanitizeForTerminal(msg.Author)
+		}
+		name := t.Text.Bold(true).Render(truncateToWidth(who, max(w-10, 8)))
 		if msg.Outgoing {
 			name = t.AccentText.Render("you")
 		}
 		lines = append(lines, bar+sp+name+t.Text.Render("  ")+t.Muted.Render(msg.At.Format("15:04")))
+	}
+	if msg.Quote != "" {
+		lines = append(lines, bar+sp+t.Muted.Render(truncateToWidth("↪ "+msg.Quote, max(w-2, 1))))
 	}
 
 	text := sanitizeForTerminal(string(msg.Body))

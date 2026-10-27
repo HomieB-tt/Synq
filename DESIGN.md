@@ -152,6 +152,12 @@ A room is a small (16 at most), invite-only, ephemeral group chat. The server ke
 
 The Nodes tab marks each connected node `●` (online) or `○` (offline), and the command bar says "bob is online." when one arrives. This is deliberate metadata the user can switch off: it is **on by default, symmetric and opt-out**. `:presence off` hides you from your nodes *and* hides them from you, so nobody can watch others while staying invisible. Only active nodes who both share are ever told; strangers, pending requests and blocked users never see or receive anything, and the server still gives a sender no delivery or "recipient offline" signal for messages. Presence is per user, not per device (see section 5).
 
+## 14. Deleting an account
+
+There was no way to leave: usernames were permanent, so a forgotten identity, a test account or an abandoned registration held its name forever. Now `:delete-account <username> confirm` calls `DELETE /users/me` and the server removes the account, its nodes, posts, files and the synapses it owns (which end for everyone), freeing the name. The local identity is kept - the keys are yours - so `:register` can claim a name again. The username you type must be your own, a guard against a stray command, since there is no undo.
+
+`synq --forget` cannot do this for you, because it exists for the case where the passphrase is lost and nothing can be signed. It prints the username that stays claimed. The server also deletes accounts that have gone unused for a while (default 60 days) and have no active node, post, comment or synapse, so an abandoned name is not held forever.
+
 ## Summary table
 
 | Area | Decision |
@@ -168,3 +174,4 @@ The Nodes tab marks each connected node `●` (online) or `○` (offline), and t
 | Synapses | Invite-only groups of up to 16; owner-distributed room key over sealed direct frames, re-keyed on removal, transferable, signed AES-256-GCM messages, memory-only, files shared room-wide and wiped when it ends, ends with its owner |
 | GitHub verification | OAuth Device Flow, optional, separate from registration |
 | Online status | Dot on the Nodes tab; on by default, symmetric, opt-out with `:presence off`; active nodes only |
+| Account deletion | `:delete-account <username> confirm`; server also reaps unused accounts after a while |

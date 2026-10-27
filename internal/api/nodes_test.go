@@ -39,3 +39,19 @@ func TestPresenceCallsUseTheDocumentedRoutes(t *testing.T) {
 		t.Errorf("SetPresence sent %s %s body=%q", method, path, body)
 	}
 }
+
+func TestDeleteAccountSendsTheConfirmation(t *testing.T) {
+	var method, path, auth, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		method, path, auth, body = r.Method, r.URL.Path, r.Header.Get("Authorization"), string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	if err := NewClient(srv.URL).DeleteAccount(context.Background(), "tok", "alice"); err != nil {
+		t.Fatalf("DeleteAccount: %v", err)
+	}
+	if method != "DELETE" || path != "/users/me" || auth != "Bearer tok" || body != `{"confirm":"alice"}` {
+		t.Errorf("sent %s %s auth=%q body=%q", method, path, auth, body)
+	}
+}

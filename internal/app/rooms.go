@@ -980,6 +980,8 @@ func (m *Model) handleRoomEvent(ev ws.Event) tea.Cmd {
 			m.commandMsg = fmt.Sprintf("You were removed from %s. Everything in it is gone from here.", name)
 		case "invite_withdrawn":
 			m.commandMsg = fmt.Sprintf("Your invitation to %s was withdrawn when the %s changed hands.", name, roomNoun)
+		case "owner_deleted":
+			m.commandMsg = fmt.Sprintf("%s ended: the owner deleted their account. Everything in it is gone.", name)
 		case "owner_gone":
 			m.commandMsg = fmt.Sprintf("%s ended: the owner went offline. Everything in it is gone.", name)
 		default:

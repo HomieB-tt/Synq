@@ -103,7 +103,7 @@ var commandSpecs = []cmdSpec{
 	// --- account ---
 	{name: "register", usage: "<username>", group: grpAccount,
 		brief:  "register a username (permanent)",
-		detail: "Claim your username on synq-server. It is permanent - there is no rename yet - and it is how people find and connect with you. Needs SYNQ_SERVER_URL to be set.",
+		detail: "Claim your username on synq-server. There is no rename (:delete-account removes the account and frees the name) and it is how people find and connect with you. Needs SYNQ_SERVER_URL to be set.",
 		prompt: "Choose a username", hint: "This is permanent and cannot be renamed later."},
 	{name: "login", group: grpAccount,
 		brief:  "log in again after :logout",
@@ -111,6 +111,9 @@ var commandSpecs = []cmdSpec{
 	{name: "logout", group: grpAccount,
 		brief:  "revoke all sessions and disconnect",
 		detail: "Sign out everywhere and disconnect. Run :login to come back."},
+	{name: "delete-account", usage: "<username> confirm", group: grpAccount, fill: true,
+		brief:  "delete your account on the server (permanent)",
+		detail: "Delete your account on synq-server for good: your nodes, posts, sessions, files and any synapses you own go with it, and your username becomes free to claim again. Your identity on this device is kept, so :register can claim a username again. Type your own username and the word confirm."},
 	{name: "name", usage: "<text>", group: grpAccount,
 		brief:  "set a local display name",
 		detail: "Set a display name that only you see on this machine. It is not your username and the server never knows it. :name clear removes it.",

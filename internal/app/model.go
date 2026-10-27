@@ -790,6 +790,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case latencyResultMsg:
 		return m.handleLatencyResult(msg)
 
+	case accountDeletedMsg:
+		return m.handleAccountDeleted(msg)
+
 	case presenceSetMsg:
 		return m.handlePresenceSet(msg)
 
@@ -1629,6 +1632,10 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 			return fmt.Sprintf("Already logged in as %s.", m.username), false, nil
 		}
 		return "Logging in...", false, loginCmd(m.apiClient, m.identity, m.username)
+
+	case "delete-account":
+		result, deleteCmd := m.deleteAccountCommand(fields[1:])
+		return result, false, deleteCmd
 
 	case "logout":
 		if m.accessToken == "" {

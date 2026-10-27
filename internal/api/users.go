@@ -33,6 +33,14 @@ func (c *Client) UploadBoxKeySig(ctx context.Context, accessToken, boxKeySigHex 
 		map[string]string{"box_key_sig": boxKeySigHex}, nil)
 }
 
+// DeleteAccount deletes the caller's account on the server for good:
+// nodes, posts, sessions, files and rooms go with it, and the username is
+// free to claim again. confirm must be the account's exact username.
+func (c *Client) DeleteAccount(ctx context.Context, accessToken, confirm string) error {
+	return c.do(ctx, http.MethodDelete, "/users/me", accessToken,
+		map[string]string{"confirm": confirm}, nil)
+}
+
 // GetPublicKeys looks up username's public keys. Requires auth - a
 // public key is meant to be discoverable by definition, but looking
 // one up is only useful to someone who has their own identity to pair

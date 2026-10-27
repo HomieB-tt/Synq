@@ -51,6 +51,12 @@ func main() {
 	// the state where every other path into Synq is blocked behind the
 	// unlock prompt.
 	if slices.Contains(os.Args[1:], "--forget") {
+		// The username is a plain preference, readable without the
+		// passphrase; look before the store is moved aside.
+		var registeredAs string
+		if dbPath, err := keyStorePath(); err == nil {
+			registeredAs = savedUsernameAt(dbPath)
+		}
 		archive, err := forgetKeyStore()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "synq:", err)
@@ -60,6 +66,14 @@ func main() {
 			fmt.Printf("Archived the key store to:\n  %s\n", archive)
 			fmt.Println("It still holds the old identity (useless without the passphrase),")
 			fmt.Println("plus theme/key-pin preferences. Synq never deletes it - do that yourself.")
+			if registeredAs != "" {
+				fmt.Println()
+				fmt.Printf("That identity was registered on synq-server as %q. Without its passphrase you\n", registeredAs)
+				fmt.Println("can no longer delete the account yourself, so the name stays claimed. It is")
+				fmt.Println("released automatically if it goes unused for a while and has no nodes or posts;")
+				fmt.Println("otherwise ask whoever runs the server to remove it. (Remember the passphrase next")
+				fmt.Println("time? :delete-account inside Synq frees a name at once.)")
+			}
 		} else {
 			fmt.Println("No key store on this device yet - nothing to forget.")
 		}
@@ -70,6 +84,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "synq:", err)
 		os.Exit(1)
 	}
+}
+
+// savedUsernameAt reads the username saved in the key store at dbPath, or
+// "" if there is no store, no username, or it cannot be read. It only
+// looks; nothing is created or changed when the file does not exist.
+func savedUsernameAt(dbPath string) string {
+	if _, err := os.Stat(dbPath); err != nil {
+		return ""
+	}
+	ks, err := db.OpenKeyStore(dbPath)
+	if err != nil {
+		return ""
+	}
+	defer ks.Close()
+	name, err := ks.LoadPreference(db.PrefUsername)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(name)
 }
 
 // forgetKeyStore locates the key store and archives it in place - see
@@ -460,7 +493,7 @@ func offerRegistration(ks *db.KeyStore, apiClient *api.Client, id *crypto.Identi
 // something the server would have accepted, or vice versa.
 func promptUsername() (string, error) {
 	out := uiStdout()
-	uiHint(out, "Your username is permanent - synq-server has no rename yet.")
+	uiHint(out, "There is no rename - :delete-account inside Synq removes the account and frees the name.")
 	fmt.Fprint(out, uiAsk("Choose a username"))
 	line, err := readLine()
 	if err != nil {

@@ -139,7 +139,7 @@ On the Nodes tab, `↑`/`↓` (also `PgUp`/`PgDn`, `g`/`G`) move through request
 
 Run a command that needs an argument with none - `:send`, `:savedir`, `:chat`, `:node`, `:accept`, `:verify`, `:register`, `:name` - and a prompt opens asking for it (as `:theme` opens its picker), so there is no syntax to remember. Typing the argument yourself, as in `:send ~/report.pdf`, still works. Not sure what is available? `:commands` lists everything, and the Profile tab's `c` key opens the same list.
 
-| Command | Does |
+| Command | What it does (Action) |
 | --- | --- |
 | `:theme` | Open the interactive theme picker - scroll with `↑`/`↓` or `j`/`k` to live-preview each theme across the whole UI, `Enter` to apply and persist it, `Esc` to cancel and restore whatever was active before. |
 | `:theme <name>` | Set a theme directly, skipping the picker. Persists across restarts. Run `:theme` with no argument to see every available name. |

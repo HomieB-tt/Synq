@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# synq-desktop: Launches Synq in a terminal emulator with window class/app-id set
+# to 'synq' so Linux desktop docks (KDE Plasma, GNOME, etc.) show the Synq icon.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Locate synq binary
+if [ -x "$SCRIPT_DIR/synq" ]; then
+    SYNQ_BIN="$SCRIPT_DIR/synq"
+elif command -v synq >/dev/null 2>&1; then
+    SYNQ_BIN="$(command -v synq)"
+elif [ -x "$HOME/.local/bin/synq" ]; then
+    SYNQ_BIN="$HOME/.local/bin/synq"
+elif [ -x "/usr/bin/synq" ]; then
+    SYNQ_BIN="/usr/bin/synq"
+elif [ -x "/usr/local/bin/synq" ]; then
+    SYNQ_BIN="/usr/local/bin/synq"
+else
+    echo "Error: synq binary not found" >&2
+    exit 1
+fi
+
+# Launch terminal emulator with custom window class/app-id/desktopfile
+if command -v konsole >/dev/null 2>&1; then
+    exec konsole --qwindowicon synq --desktopfile synq.desktop -e "$SYNQ_BIN" "$@"
+elif command -v alacritty >/dev/null 2>&1; then
+    exec alacritty --class synq,synq -e "$SYNQ_BIN" "$@"
+elif command -v kitty >/dev/null 2>&1; then
+    exec kitty --class synq "$SYNQ_BIN" "$@"
+elif command -v foot >/dev/null 2>&1; then
+    exec foot --app-id synq "$SYNQ_BIN" "$@"
+elif command -v gnome-terminal >/dev/null 2>&1; then
+    exec gnome-terminal --class=synq --name=synq -- "$SYNQ_BIN" "$@"
+elif command -v ptyxis >/dev/null 2>&1; then
+    exec ptyxis --app-id synq -- "$SYNQ_BIN" "$@"
+elif command -v kgx >/dev/null 2>&1; then
+    exec kgx -e "$SYNQ_BIN" "$@"
+elif command -v xfce4-terminal >/dev/null 2>&1; then
+    exec xfce4-terminal --role=synq -e "$SYNQ_BIN" "$@"
+elif command -v wezterm >/dev/null 2>&1; then
+    exec wezterm start --class synq "$SYNQ_BIN" "$@"
+elif [ -n "${TERMINAL:-}" ] && command -v "$TERMINAL" >/dev/null 2>&1; then
+    exec "$TERMINAL" -e "$SYNQ_BIN" "$@"
+elif command -v x-terminal-emulator >/dev/null 2>&1; then
+    exec x-terminal-emulator -e "$SYNQ_BIN" "$@"
+elif command -v xterm >/dev/null 2>&1; then
+    exec xterm -class synq -e "$SYNQ_BIN" "$@"
+else
+    exec "$SYNQ_BIN" "$@"
+fi

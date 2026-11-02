@@ -25,7 +25,7 @@ Synq ships with support for both command-line use and click-to-launch with the o
 * **Debian / Ubuntu / Fedora / RHEL**:
   Releases include `.deb` and `.rpm` packages built with GoReleaser NFPM. Installing the package puts `synq` in `/usr/bin/synq`, installs `synq.desktop`, and installs the icon to `/usr/share/icons/hicolor/`.
 * **Tarball (`.tar.gz`)**:
-  Run `./scripts/install.sh` (or `./install.sh`) to install `synq` to `~/.local/bin` and register the desktop launcher and icon into `~/.local/share/` without needing root.
+  Run `./scripts/install.sh` (or `./install.sh`) to install `synq` to `~/.local/bin` and register the desktop launcher and icon into `~/.local/share/` without needing root. To uninstall, run `./scripts/uninstall.sh` (or with `--purge` to delete stored data).
 * **Click-to-launch**:
   Clicking "Synq" in your application grid launches your desktop's default terminal running `synq`. Exiting `:quit` closes the window.
 

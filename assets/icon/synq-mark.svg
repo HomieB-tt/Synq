@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<title>Synq</title>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2e2850"/><stop offset="1" stop-color="#14131d"/></linearGradient>
+<clipPath id="top"><rect x="86" y="120" width="230" height="170" rx="46"/></clipPath>
+</defs>
+<polygon points="128,284 108,342 178,284" fill="#bd93f9"/>
+<rect x="86" y="120" width="230" height="170" rx="46" fill="#bd93f9"/>
+<polygon points="384,386 410,446 330,386" fill="#ff79c6"/>
+<rect x="196" y="222" width="230" height="170" rx="46" fill="#ff79c6"/>
+<g clip-path="url(#top)"><rect x="196" y="222" width="230" height="170" rx="46" fill="#f8f8f2"/></g>
+<circle cx="140" cy="176" r="13" fill="#282a36" fill-opacity="0.7"/>
+<circle cx="186" cy="176" r="13" fill="#282a36" fill-opacity="0.7"/>
+<circle cx="232" cy="176" r="13" fill="#282a36" fill-opacity="0.7"/>
+</svg>

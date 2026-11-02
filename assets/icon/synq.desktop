@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Synq
+GenericName=Private Messenger
+Comment=Private, ephemeral terminal messaging
+Exec=synq
+Icon=synq
+Terminal=true
+Categories=Network;InstantMessaging;ConsoleOnly;
+Keywords=chat;messaging;encrypted;ephemeral;terminal;

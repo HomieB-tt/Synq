@@ -25,6 +25,11 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Embed Windows icon
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          go-winres simply --arch amd64,arm64 --icon assets/icon/synq.ico --out cmd/synq/rsrc --product-name "Synq" --file-description "Private, ephemeral terminal messaging"
+
       - name: Create release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -120,6 +125,27 @@ jobs:
             package_dir="$arch_dir/package"
             mkdir -p "$package_dir"
             cp "$arch_dir/synq" "$arch_dir/README.md" "$arch_dir/LICENSE" "$package_dir/"
+            if [ -d "$arch_dir/assets" ]; then
+              cp -r "$arch_dir/assets" "$package_dir/"
+            fi
+            if [ -d "$arch_dir/scripts" ]; then
+              cp -r "$arch_dir/scripts" "$package_dir/"
+            fi
+
+            # Build Synq.app bundle
+            app_dir="$package_dir/Synq.app"
+            mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
+            cp "$arch_dir/assets/icon/synq.icns" "$app_dir/Contents/Resources/synq.icns"
+            cp "$arch_dir/assets/macos/Info.plist" "$app_dir/Contents/Info.plist"
+            printf 'APPL????' > "$app_dir/Contents/PkgInfo"
+            cp "$arch_dir/assets/macos/synq-launcher" "$app_dir/Contents/MacOS/synq-launcher"
+            chmod +x "$app_dir/Contents/MacOS/synq-launcher"
+            cp "$arch_dir/synq" "$app_dir/Contents/MacOS/synq"
+
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_dir/Contents/MacOS/synq"
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_dir/Contents/MacOS/synq-launcher"
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app_dir"
+
             ditto -c -k "$package_dir" "$signed_dir/$base.zip"
             xcrun notarytool submit "$signed_dir/$base.zip" \
               --key "$key_path" \

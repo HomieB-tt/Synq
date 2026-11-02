@@ -35,6 +35,29 @@ archives:
     files:
       - README.md
       - LICENSE
+      - assets/**/*
+      - scripts/install.sh
+
+nfpms:
+  - id: synq-packages
+    package_name: synq
+    builds:
+      - synq
+    vendor: Synq
+    homepage: https://github.com/HomieB-tt/synq
+    maintainer: Carlton <montanajeremy160@outlook.com>
+    description: Private, ephemeral terminal messaging
+    license: Proprietary
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: ./assets/icon/synq.desktop
+        dst: /usr/share/applications/synq.desktop
+      - src: ./assets/icon/synq-256.png
+        dst: /usr/share/icons/hicolor/256x256/apps/synq.png
+      - src: ./assets/icon/synq.svg
+        dst: /usr/share/icons/hicolor/scalable/apps/synq.svg
 
 checksum:
   name_template: checksums.txt

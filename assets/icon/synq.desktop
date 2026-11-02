@@ -6,6 +6,7 @@ Comment=Private, ephemeral terminal messaging
 Exec=synq-desktop
 Icon=synq
 Terminal=false
+StartupNotify=true
 StartupWMClass=synq
 Categories=Network;InstantMessaging;ConsoleOnly;
 Keywords=chat;messaging;encrypted;ephemeral;terminal;

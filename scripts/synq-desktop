@@ -3,6 +3,12 @@ set -euo pipefail
 
 # synq-desktop: Launches Synq in a terminal emulator with window class/app-id set
 # to 'synq' so Linux desktop docks (KDE Plasma, GNOME, etc.) show the Synq icon.
+#
+# On Wayland, the compositor identifies windows by their app_id. If we just
+# run `konsole -e synq`, the window's app_id is `org.kde.konsole` and the
+# dock shows the Konsole icon. Each terminal emulator has its own flag to
+# override this, so the dock matches the window to synq.desktop and
+# displays the Synq icon instead.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -22,25 +28,30 @@ else
     exit 1
 fi
 
-# Launch terminal emulator with custom window class/app-id/desktopfile
+# Launch terminal emulator with custom window class/app-id
+#
+# Konsole: --separate forces a new process (otherwise Konsole reuses an
+#          existing instance via D-Bus and ignores --desktopfile).
+#          --desktopfile sets the Wayland app_id (pass base name WITHOUT
+#          .desktop extension so KDE matches synq → synq.desktop).
 if command -v konsole >/dev/null 2>&1; then
-    exec konsole --qwindowicon synq --desktopfile synq.desktop -e "$SYNQ_BIN" "$@"
+    exec konsole --separate --desktopfile synq -e "$SYNQ_BIN" "$@"
 elif command -v alacritty >/dev/null 2>&1; then
     exec alacritty --class synq,synq -e "$SYNQ_BIN" "$@"
 elif command -v kitty >/dev/null 2>&1; then
     exec kitty --class synq "$SYNQ_BIN" "$@"
 elif command -v foot >/dev/null 2>&1; then
     exec foot --app-id synq "$SYNQ_BIN" "$@"
+elif command -v wezterm >/dev/null 2>&1; then
+    exec wezterm start --class synq "$SYNQ_BIN" "$@"
 elif command -v gnome-terminal >/dev/null 2>&1; then
     exec gnome-terminal --class=synq --name=synq -- "$SYNQ_BIN" "$@"
 elif command -v ptyxis >/dev/null 2>&1; then
-    exec ptyxis --app-id synq -- "$SYNQ_BIN" "$@"
+    exec ptyxis -- "$SYNQ_BIN" "$@"
 elif command -v kgx >/dev/null 2>&1; then
     exec kgx -e "$SYNQ_BIN" "$@"
 elif command -v xfce4-terminal >/dev/null 2>&1; then
     exec xfce4-terminal --role=synq -e "$SYNQ_BIN" "$@"
-elif command -v wezterm >/dev/null 2>&1; then
-    exec wezterm start --class synq "$SYNQ_BIN" "$@"
 elif [ -n "${TERMINAL:-}" ] && command -v "$TERMINAL" >/dev/null 2>&1; then
     exec "$TERMINAL" -e "$SYNQ_BIN" "$@"
 elif command -v x-terminal-emulator >/dev/null 2>&1; then

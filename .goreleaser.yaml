@@ -36,7 +36,7 @@ archives:
       - README.md
       - LICENSE
       - assets/**/*
-      - scripts/**/*
+      - scripts/*
 
 nfpms:
   - id: synq-packages

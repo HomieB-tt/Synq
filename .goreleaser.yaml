@@ -36,7 +36,7 @@ archives:
       - README.md
       - LICENSE
       - assets/**/*
-      - scripts/install.sh
+      - scripts/*
 
 nfpms:
   - id: synq-packages
@@ -54,6 +54,8 @@ nfpms:
     contents:
       - src: ./assets/icon/synq.desktop
         dst: /usr/share/applications/synq.desktop
+      - src: ./scripts/synq-desktop
+        dst: /usr/bin/synq-desktop
       - src: ./assets/icon/synq-256.png
         dst: /usr/share/icons/hicolor/256x256/apps/synq.png
       - src: ./assets/icon/synq.svg

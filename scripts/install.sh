@@ -70,6 +70,12 @@ else
 
     install -m 755 "$BASE_DIR/synq" "$BINDIR/synq"
 
+    if [ -f "$BASE_DIR/scripts/synq-desktop" ]; then
+        install -m 755 "$BASE_DIR/scripts/synq-desktop" "$BINDIR/synq-desktop"
+    elif [ -f "$BASE_DIR/synq-desktop" ]; then
+        install -m 755 "$BASE_DIR/synq-desktop" "$BINDIR/synq-desktop"
+    fi
+
     if [ -f "$BASE_DIR/assets/icon/synq-256.png" ]; then
         install -m 644 "$BASE_DIR/assets/icon/synq-256.png" "$ICONDIR/256x256/apps/synq.png"
     fi

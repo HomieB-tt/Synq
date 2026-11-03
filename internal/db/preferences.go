@@ -54,6 +54,18 @@ const PrefBoot = "boot"
 // not been seen, so it is shown at the next launch.
 const PrefWelcomed = "welcomed"
 
+// Notification preferences (internal/app's `:notify` command). Each of
+// the four switches is stored as "on" or "off"; an unset key means the
+// built-in default (title and bell on, desktop and sender off).
+// PrefNotifyMuted is a JSON array of muted thread keys.
+const (
+	PrefNotifyTitle   = "notify_title"
+	PrefNotifyBell    = "notify_bell"
+	PrefNotifyDesktop = "notify_desktop"
+	PrefNotifySender  = "notify_sender"
+	PrefNotifyMuted   = "notify_muted"
+)
+
 // PrefServerURL is the preferences key under which the synq-server
 // address chosen in the app (first-run prompt or `:server`) is stored.
 // Empty or unset means none was chosen, so the build-time default (if

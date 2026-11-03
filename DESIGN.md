@@ -158,6 +158,12 @@ There was no way to leave: usernames were permanent, so a forgotten identity, a 
 
 `synq --forget` cannot do this for you, because it exists for the case where the passphrase is lost and nothing can be signed. It prints the username that stays claimed. The server also deletes accounts that have gone unused for a while (default 60 days) and have no active node, post, comment or synapse, so an abandoned name is not held forever.
 
+## 15. Notifications
+
+Unread counts and the command-bar line only help while Synq is on screen. `:notify` adds three independent layers for when it is not: a `(n) Synq` badge in the window title, a terminal bell, and a desktop notification. Title and bell are on by default; desktop is off until the user turns it on.
+
+Privacy comes first. A notification carries no message text, ever: it says "New message", "New activity in a synapse", "New node request" or "Node request accepted", and names the sender only after `:notify sender on`, because previews end up on lock screens and in notification history. Alerts stay quiet while the terminal reports that Synq is focused (focus reporting), are limited to one sound or notification every few seconds so a burst is one alert, and can be muted per chat or synapse. A terminal that never reports focus is treated as away, so it still gets alerts. Desktop notifications go through the terminal's own escape sequence where it has one (kitty, iTerm2, WezTerm, Ghostty, foot); elsewhere Synq falls back to `notify-send` (Linux) or `osascript` (macOS). The text passed on is stripped of control characters first.
+
 ## Summary table
 
 | Area | Decision |
@@ -174,4 +180,5 @@ There was no way to leave: usernames were permanent, so a forgotten identity, a 
 | Synapses | Invite-only groups of up to 16; owner-distributed room key over sealed direct frames, re-keyed on removal, transferable, signed AES-256-GCM messages, memory-only, files shared room-wide and wiped when it ends, ends with its owner |
 | GitHub verification | OAuth Device Flow, optional, separate from registration |
 | Online status | Dot on the Nodes tab; on by default, symmetric, opt-out with `:presence off`; active nodes only |
+| Notifications | Title badge and bell on by default, desktop opt-in; never includes message text; quiet while focused; throttled; per-chat mute |
 | Account deletion | `:delete-account <username> confirm`; server also reaps unused accounts after a while |

@@ -349,6 +349,10 @@ type Model struct {
 	presenceShare bool
 	online        map[string]bool
 
+	// notify is the :notify state: title badge, bell, desktop alerts,
+	// muted threads and focus tracking (see notify.go).
+	notify notifyState
+
 	// Feed tab (see feed.go). feedPosts is what's loaded so far, newest
 	// first, with feedIndex the selection; feedOpen is true while one
 	// post and its comments are showing. composeOpen/compose are the
@@ -625,6 +629,7 @@ func New(id *crypto.Identity, store *db.KeyStore, session Session) Model {
 		accessToken:    session.AccessToken,
 		refreshToken:   session.RefreshToken,
 		chatStore:      chat.NewStore(),
+		notify:         loadNotify(store),
 	}
 }
 
@@ -688,12 +693,16 @@ func (m Model) Init() tea.Cmd {
 // means none of the several ways of opening a thread (or of receiving a
 // message) has to remember to.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.trackFocus(msg)
 	prev := m.selectedThread()
 	next, cmd := m.update(msg)
 	nm, ok := next.(Model)
 	if !ok {
 		return next, cmd
 	}
+	// Anything raised while handling the message becomes a bell or a
+	// desktop notification here, once, whatever handler raised it.
+	nm, cmd = nm.flushAlert(cmd)
 	// "Since you last looked" ends when you leave the Feed or quit.
 	if (m.activeTab == tabFeed && nm.activeTab != tabFeed) || (nm.quitting && !m.quitting) {
 		nm.markFeedSeen()
@@ -1014,10 +1023,12 @@ func (m Model) handleWSFrame(msg wsFrameMsg) (tea.Model, tea.Cmd) {
 	case msg.event.Type == ws.EventTypeNodeRequest:
 		// The frame carries only the requester's id; the refresh below
 		// brings their username into the Nodes tab.
+		m.raiseAlert(alertNodeRequest, "")
 		m.commandMsg = "New node request - see the Nodes tab (2) and :accept <username>."
 		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), m.fetchNodesCmd())
 
 	case msg.event.Type == ws.EventTypeNodeAccepted:
+		m.raiseAlert(alertNodeAccepted, "")
 		m.commandMsg = "A node request you sent was accepted - see the Nodes tab (2)."
 		return m, tea.Batch(waitForWSFrameCmd(m.wsClient), m.fetchNodesCmd())
 
@@ -1573,6 +1584,9 @@ func (m *Model) runCommand(cmd string) (result string, quit bool, extraCmd tea.C
 		result, presenceCmd := m.presenceCommand(fields[1:])
 		return result, false, presenceCmd
 
+	case "notify":
+		return m.notifyCommand(fields[1:]), false, nil
+
 	case "post":
 		cat := ""
 		if len(fields) > 1 {
@@ -1801,6 +1815,10 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(screen)
 	v.AltScreen = true
+	// Focus reports let alerts stay quiet while you are looking at Synq;
+	// the title carries the "(n) Synq" badge (see notify.go).
+	v.ReportFocus = true
+	v.WindowTitle = m.windowTitle()
 	return v
 }
 

@@ -164,6 +164,13 @@ func (m Model) viewingThread(contact chat.ContactKey) bool {
 // list), and, when notify is set, the bottom bar says who wrote - a
 // message arriving while you are on another tab used to give no sign.
 func (m *Model) noteUnread(contact chat.ContactKey, notify bool) {
+	// Alert first: even the open thread should ring when Synq itself is
+	// in another tab or behind another app (raiseAlert checks focus).
+	kind := alertMessage
+	if isRoomThread(contact) {
+		kind = alertRoom
+	}
+	m.raiseAlert(kind, contact)
 	if m.viewingThread(contact) {
 		return
 	}

@@ -8,5 +8,5 @@ Icon=synq
 Terminal=false
 StartupNotify=true
 StartupWMClass=synq
-Categories=Network;InstantMessaging;ConsoleOnly;
+Categories=Network;InstantMessaging;
 Keywords=chat;messaging;encrypted;ephemeral;terminal;

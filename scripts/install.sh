@@ -85,7 +85,16 @@ else
     fi
 
     if [ -f "$BASE_DIR/assets/icon/synq.desktop" ]; then
-        install -m 644 "$BASE_DIR/assets/icon/synq.desktop" "$APPDIR/synq.desktop"
+        # Point Exec at the installed launcher by absolute path: menus
+        # started from a desktop session do not always have ~/.local/bin on
+        # their PATH, and a bare "synq-desktop" would then fail silently.
+        LAUNCHER="$BINDIR/synq-desktop"
+        case "$LAUNCHER" in
+            *" "*) LAUNCHER="\"$LAUNCHER\"" ;;
+        esac
+        EXEC_LINE="Exec=$LAUNCHER" awk '/^Exec=/ { print ENVIRON["EXEC_LINE"]; next } { print }' \
+            "$BASE_DIR/assets/icon/synq.desktop" > "$APPDIR/synq.desktop"
+        chmod 644 "$APPDIR/synq.desktop"
     fi
 
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPDIR" || true

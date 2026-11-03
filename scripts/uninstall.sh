@@ -34,24 +34,49 @@ else
     echo "Removed Synq binaries, desktop entry, and icons."
 fi
 
-# Check for --purge flag to delete data store
+# --purge deletes your identity keys and settings: there is no undo, so it
+# asks first (pass --yes to skip the question, e.g. in a script).
 PURGE=false
+ASSUME_YES=false
 for arg in "$@"; do
-    if [ "$arg" = "--purge" ]; then
-        PURGE=true
-    fi
+    case "$arg" in
+        --purge) PURGE=true ;;
+        --yes|-y) ASSUME_YES=true ;;
+    esac
 done
 
-DATA_DIR="$HOME/.local/share/synq"
+# Where Synq keeps its identity and preferences: Go's os.UserConfigDir()
+# plus "synq". The received-file cache lives under os.UserCacheDir().
 if [ "$OS" = "Darwin" ]; then
     DATA_DIR="$HOME/Library/Application Support/synq"
+    CACHE_DIR="$HOME/Library/Caches/synq"
+else
+    DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/synq"
+    CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/synq"
 fi
 
 if [ "$PURGE" = "true" ]; then
     if [ -d "$DATA_DIR" ]; then
+        if [ "$ASSUME_YES" != "true" ]; then
+            if [ ! -t 0 ]; then
+                echo "Refusing to purge without a terminal to confirm on. Re-run with --purge --yes." >&2
+                exit 1
+            fi
+            echo ""
+            echo "This will permanently delete your Synq identity keys and settings in:"
+            echo "  $DATA_DIR"
+            echo "Without the keys (and your passphrase) your account cannot be recovered."
+            printf 'Type "delete" to continue: '
+            read -r answer
+            if [ "$answer" != "delete" ]; then
+                echo "Cancelled. Your data was not touched."
+                exit 1
+            fi
+        fi
         rm -rf "$DATA_DIR"
         echo "Purged Synq data directory ($DATA_DIR)."
     fi
+    rm -rf "$CACHE_DIR"
 else
     if [ -d "$DATA_DIR" ]; then
         echo ""
